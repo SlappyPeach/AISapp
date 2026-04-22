@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="content-grid">
+    <article class="panel">
+        <div class="panel-head">
+            <h3>Создать резервную копию</h3>
+        </div>
+        <p>Копия формируется в формате JSON и сохраняется в папку <code>backups</code> внутри проекта.</p>
+        <form method="post" class="stack-form">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="create">
+            <button type="submit" class="primary-button">Создать резервную копию</button>
+        </form>
+    </article>
+
+    <article class="panel panel-wide">
+        <div class="panel-head">
+            <h3>Доступные копии</h3>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Файл</th>
+                        <th>Размер, байт</th>
+                        <th>Изменен</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in items %}
+                        <tr>
+                            <td>{{ item.name }}</td>
+                            <td>{{ item.size }}</td>
+                            <td>{{ item.modified_at }}</td>
+                            <td>
+                                <div class="action-row">
+                                    <a class="ghost-button" href="{% url 'download-backup' item.name %}">Скачать</a>
+                                    <form method="post" class="inline-form" onsubmit="return confirm('Восстановить данные из этой резервной копии? Текущие записи будут заменены.');">
+                                        {% csrf_token %}
+                                        <input type="hidden" name="action" value="restore-existing">
+                                        <input type="hidden" name="backup_name" value="{{ item.name }}">
+                                        <button type="submit" class="secondary-button">Восстановить</button>
+                                    </form>
+                                </div>
+                            </td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="4">Резервных копий пока нет.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </article>
+</section>
+
+<section class="panel">
+    <div class="panel-head">
+        <h3>Восстановить из файла</h3>
+    </div>
+    <p>Загрузите JSON-файл резервной копии, если нужно вернуть систему к состоянию из внешней копии.</p>
+    <form method="post" enctype="multipart/form-data" class="stack-form">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="restore-upload">
+        {% if restore_form.non_field_errors %}
+            <div class="field-error">{{ restore_form.non_field_errors|join:", " }}</div>
+        {% endif %}
+        {% for field in restore_form %}
+            <div class="field">
+                <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {{ field }}
+                {% if field.errors %}
+                    <div class="field-error">{{ field.errors|join:", " }}</div>
+                {% endif %}
+            </div>
+        {% endfor %}
+        <button type="submit" class="secondary-button">Восстановить из файла</button>
+    </form>
+</section>
+{% endblock %}

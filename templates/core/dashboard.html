@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="metrics-grid">
+    <article class="metric-card">
+        <span>Договоры СМР</span>
+        <strong>{{ metrics.contracts }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>Документы в работе</span>
+        <strong>{{ metrics.pending }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>Документы поставщиков</span>
+        <strong>{{ metrics.supplier_docs }}</strong>
+    </article>
+    <article class="metric-card">
+        <span>Активные задачи</span>
+        <strong>{{ metrics.site_tasks }}</strong>
+    </article>
+    <article class="metric-card alert-card">
+        <span>Низкие остатки</span>
+        <strong>{{ metrics.alerts }}</strong>
+    </article>
+</section>
+
+<section class="content-grid">
+    <article class="panel">
+        <div class="panel-head">
+            <h3>Критические остатки</h3>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Код</th>
+                        <th>Материал</th>
+                        <th>Остаток</th>
+                        <th>Мин.</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in alerts %}
+                        <tr>
+                            <td>{{ item.code }}</td>
+                            <td>{{ item.name }}</td>
+                            <td>{{ item.warehouse_balance }}</td>
+                            <td>{{ item.min_stock }}</td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="4">Критических остатков нет.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </article>
+
+    <article class="panel">
+        <div class="panel-head">
+            <h3>Последние документы</h3>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Тип</th>
+                        <th>Номер</th>
+                        <th>Дата</th>
+                        <th>Статус</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for record in recent_documents %}
+                        <tr>
+                            <td>{{ record.doc_type }}</td>
+                            <td>{{ record.doc_number }}</td>
+                            <td>{{ record.doc_date }}</td>
+                            <td>{{ record.get_status_display }}</td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="4">Документов пока нет.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </article>
+</section>
+
+<section class="content-grid">
+    <article class="panel">
+        <div class="panel-head">
+            <h3>Остатки центрального склада</h3>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Код</th>
+                        <th>Материал</th>
+                        <th>Ед.</th>
+                        <th>Остаток</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in warehouse_rows %}
+                        <tr>
+                            <td>{{ item.code }}</td>
+                            <td>{{ item.name }}</td>
+                            <td>{{ item.unit }}</td>
+                            <td>{{ item.warehouse_balance }}</td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="4">Нет данных по складу.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </article>
+
+    <article class="panel">
+        <div class="panel-head">
+            <h3>Остатки по участкам</h3>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Участок</th>
+                        <th>Код</th>
+                        <th>Материал</th>
+                        <th>Количество</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in site_rows %}
+                        <tr>
+                            <td>{{ item.location_name }}</td>
+                            <td>{{ item.code }}</td>
+                            <td>{{ item.name }}</td>
+                            <td>{{ item.quantity }}</td>
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="4">Нет данных по участкам.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </article>
+</section>
+{% endblock %}

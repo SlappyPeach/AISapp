@@ -1,0 +1,33 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Вход в систему · АО «СТ-1»</title>
+    <link rel="stylesheet" href="{% static 'css/app.css' %}">
+</head>
+<body class="login-body">
+    <section class="login-card">
+        <span class="brand-kicker">АО «СТ-1»</span>
+        <h1>Вход в систему</h1>
+        <p>Авторизация в АИС учета материалов и документооборота.</p>
+        <form method="post" class="stack-form">
+            {% csrf_token %}
+            {% for field in form %}
+                <div class="field">
+                    <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                    {{ field }}
+                    {% if field.errors %}
+                        <div class="field-error">{{ field.errors|join:", " }}</div>
+                    {% endif %}
+                </div>
+            {% endfor %}
+            {% if form.non_field_errors %}
+                <div class="field-error">{{ form.non_field_errors|join:", " }}</div>
+            {% endif %}
+            <button type="submit" class="primary-button">Войти</button>
+        </form>        
+    </section>
+</body>
+</html>

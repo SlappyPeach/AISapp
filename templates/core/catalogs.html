@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="hero-panel">
+    <p>{{ description }}</p>
+</section>
+
+<section class="content-grid">
+    <article class="panel">
+        <div class="panel-head">
+            <h3>{% if is_editing %}Редактировать запись{% else %}Добавить запись{% endif %}</h3>
+        </div>
+        {% if can_create %}
+            <form method="post" class="stack-form">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="save">
+                {% if is_editing %}
+                    <input type="hidden" name="object_id" value="{{ form.instance.pk }}">
+                {% endif %}
+                {% if form.non_field_errors %}
+                    <div class="field-error">{{ form.non_field_errors|join:", " }}</div>
+                {% endif %}
+                {% for field in form %}
+                    <div class="field">
+                        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                        {{ field }}
+                        {% if field.help_text %}
+                            <div class="field-help">{{ field.help_text }}</div>
+                        {% endif %}
+                        {% if field.errors %}
+                            <div class="field-error">{{ field.errors|join:", " }}</div>
+                        {% endif %}
+                    </div>
+                {% endfor %}
+                <div class="action-row">
+                    <button type="submit" class="primary-button">{% if is_editing %}Сохранить изменения{% else %}Сохранить{% endif %}</button>
+                    {% if is_editing %}
+                        <a class="ghost-button" href="{% url 'catalog-page' current_catalog %}">Отменить</a>
+                    {% endif %}
+                </div>
+            </form>
+        {% else %}
+            <div class="field-help">Для вашей роли доступен только просмотр списка.</div>
+        {% endif %}
+    </article>
+
+    <article class="panel panel-wide">
+        <div class="panel-head">
+            <h3>Последние записи</h3>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        {% for header in headers %}
+                            <th>{{ header }}</th>
+                        {% endfor %}
+                        {% if catalog_has_manage_actions %}
+                            <th>Действия</th>
+                        {% endif %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in rows %}
+                        <tr>
+                            {% for cell in row.cells %}
+                                <td>{{ cell }}</td>
+                            {% endfor %}
+                            {% if catalog_has_manage_actions %}
+                                <td>
+                                    <div class="action-row">
+                                        <a class="ghost-button" href="{{ row.edit_url }}">Изменить</a>
+                                        <form method="post" class="inline-form">
+                                            {% csrf_token %}
+                                            <input type="hidden" name="action" value="delete">
+                                            <input type="hidden" name="object_id" value="{{ row.id }}">
+                                            <button type="submit" class="secondary-button">Удалить</button>
+                                        </form>
+                                    </div>
+                                </td>
+                            {% endif %}
+                        </tr>
+                    {% empty %}
+                        <tr>
+                            <td colspan="{% if catalog_has_manage_actions %}{{ headers|length|add:'1' }}{% else %}{{ headers|length }}{% endif %}">Записей пока нет.</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </article>
+</section>
+{% endblock %}

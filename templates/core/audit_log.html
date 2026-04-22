@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel">
+    <div class="panel-head">
+        <h3>Фильтры журнала</h3>
+    </div>
+    <form method="get" class="filter-grid">
+        {% for field in form %}
+            <div class="field">
+                <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {{ field }}
+            </div>
+        {% endfor %}
+        <button type="submit" class="primary-button">Применить</button>
+    </form>
+</section>
+
+<section class="panel">
+    <div class="panel-head">
+        <h3>Последние действия</h3>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Дата и время</th>
+                    <th>Пользователь</th>
+                    <th>Действие</th>
+                    <th>Сущность</th>
+                    <th>Идентификатор</th>
+                    <th>IP-адрес</th>
+                    <th>Детали</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for entry in entries %}
+                    <tr>
+                        <td>{{ entry.created_at|date:"d.m.Y H:i" }}</td>
+                        <td>{% if entry.user %}{{ entry.user.full_name_or_username }}{% else %}Система{% endif %}</td>
+                        <td>{{ entry.action }}</td>
+                        <td>{{ entry.entity_type }}</td>
+                        <td>{{ entry.entity_id|default:"-" }}</td>
+                        <td>{{ entry.ip_address|default:"-" }}</td>
+                        <td>{{ entry.details|default:"-" }}</td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="7">По выбранным фильтрам записей не найдено.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

@@ -1,0 +1,486 @@
+﻿{% extends "base.html" %}
+
+{% block content %}
+<section class="hero-panel">
+    <p>{{ description }}</p>
+</section>
+
+<section class="content-grid">
+    <article class="panel">
+        <div class="panel-head">
+            <h3>Создать документ</h3>
+        </div>
+        {% if can_create %}
+            <form method="post" enctype="multipart/form-data" class="stack-form" data-autosave-url="{{ autosave_url }}">
+                {% csrf_token %}
+                <div class="field-help" id="draft-status">
+                    {% if draft_loaded %}
+                        Загружен автосохраненный черновик.
+                    {% else %}
+                        Черновик сохраняется автоматически.
+                    {% endif %}
+                </div>
+                {% if form.non_field_errors %}
+                    <div class="field-error">{{ form.non_field_errors|join:", " }}</div>
+                {% endif %}
+                {% for field in form %}
+                    {% if field.name == "items" %}
+                        <div class="field">
+                            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                            {{ field }}
+                            <div class="items-grid" data-items-grid>
+                                <div class="table-wrap">
+                                    <table class="items-table">
+                                        <thead data-items-head></thead>
+                                        <tbody data-items-body></tbody>
+                                    </table>
+                                </div>
+                                <div class="action-row">
+                                    <button type="button" class="secondary-button" data-items-add>Добавить строку</button>
+                                    <button type="button" class="ghost-button" data-items-clear>Очистить строки</button>
+                                </div>
+                            </div>
+                            {% if field.help_text %}
+                                <div class="field-help">{{ field.help_text }}</div>
+                            {% endif %}
+                            {% if field.errors %}
+                                <div class="field-error">{{ field.errors|join:", " }}</div>
+                            {% endif %}
+                        </div>
+                    {% else %}
+                        <div class="field">
+                            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                            {{ field }}
+                            {% if field.help_text %}
+                                <div class="field-help">{{ field.help_text }}</div>
+                            {% endif %}
+                            {% if field.errors %}
+                                <div class="field-error">{{ field.errors|join:", " }}</div>
+                            {% endif %}
+                        </div>
+                    {% endif %}
+                {% endfor %}
+                {% if sample_lines and not has_items_field %}
+                    <div class="hint-box">
+                        <strong>Пример строк:</strong>
+                        <pre>{{ sample_lines }}</pre>
+                    </div>
+                {% endif %}
+                <button type="submit" class="primary-button">Создать</button>
+            </form>
+        {% else %}
+            <div class="field-help">Для вашей роли доступен только просмотр списка.</div>
+        {% endif %}
+    </article>
+
+    <article class="panel panel-wide">
+        <div class="panel-head">
+            <h3>Последние документы</h3>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        {% for header in headers %}
+                            <th>{{ header }}</th>
+                        {% endfor %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in rows %}
+                        <tr>
+                            {% for cell in row %}
+                                <td>{{ cell }}</td>
+                            {% endfor %}
+                        </tr>
+                    {% empty %}
+                        <tr><td colspan="{{ headers|length }}">Документов пока нет.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </article>
+</section>
+
+{{ material_catalog|json_script:"material-catalog-data" }}
+{{ worker_catalog|json_script:"worker-catalog-data" }}
+
+<script>
+(() => {
+    const form = document.querySelector("form[data-autosave-url]");
+    if (!form) return;
+
+    const statusNode = document.getElementById("draft-status");
+    const autosaveUrl = form.dataset.autosaveUrl;
+    let timerId = null;
+
+    const updateStatus = (text) => {
+        if (statusNode) {
+            statusNode.textContent = text;
+        }
+    };
+
+    const saveDraft = async () => {
+        try {
+            const response = await fetch(autosaveUrl, {
+                method: "POST",
+                headers: {
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                body: new FormData(form),
+            });
+            if (!response.ok) {
+                throw new Error("autosave failed");
+            }
+            const payload = await response.json();
+            if (payload.saved) {
+                updateStatus(`Черновик сохранен в ${payload.saved_at}`);
+            } else {
+                updateStatus("Черновик очищен");
+            }
+        } catch (_error) {
+            updateStatus("Не удалось сохранить черновик");
+        }
+    };
+
+    const scheduleSave = () => {
+        updateStatus("Сохраняем черновик...");
+        window.clearTimeout(timerId);
+        timerId = window.setTimeout(saveDraft, 900);
+    };
+
+    const parseJsonScript = (id) => {
+        const node = document.getElementById(id);
+        if (!node) return [];
+        try {
+            const parsed = JSON.parse(node.textContent || "[]");
+            return Array.isArray(parsed) ? parsed : [];
+        } catch (_error) {
+            return [];
+        }
+    };
+
+    const materialCatalog = parseJsonScript("material-catalog-data");
+    const workerCatalog = parseJsonScript("worker-catalog-data");
+
+    const normalizeCode = (value) => String(value || "").trim().toUpperCase();
+    const materialIndex = new Map(materialCatalog.map((item) => [normalizeCode(item.code), item]));
+    const workerIndex = new Map(workerCatalog.map((item) => [String(item.employee_number || "").trim(), item]));
+
+    const ensureDatalist = (id, values, formatter) => {
+        if (!values.length || document.getElementById(id)) return;
+        const datalist = document.createElement("datalist");
+        datalist.id = id;
+        values.forEach((value) => {
+            const option = document.createElement("option");
+            option.value = formatter(value).value;
+            option.label = formatter(value).label;
+            datalist.appendChild(option);
+        });
+        form.appendChild(datalist);
+    };
+
+    ensureDatalist("material-code-options", materialCatalog, (item) => ({
+        value: String(item.code || ""),
+        label: `${item.code || ""} ${item.name || ""}`.trim(),
+    }));
+
+    ensureDatalist("worker-number-options", workerCatalog, (item) => ({
+        value: String(item.employee_number || ""),
+        label: `${item.employee_number || ""} ${item.full_name || ""}`.trim(),
+    }));
+
+    const parseLegacyRows = (rawValue, mode) => {
+        const rows = [];
+        rawValue.split(/\r?\n/).forEach((rawLine) => {
+            const line = rawLine.trim();
+            if (!line) return;
+            const parts = line.split("|").map((item) => item.trim());
+            if (mode === "ppe-lines") {
+                rows.push({
+                    employee_number: parts[0] || "",
+                    material_code: parts[1] || "",
+                    quantity: parts[2] || "",
+                    service_life_months: parts[3] || "",
+                });
+            } else {
+                rows.push({
+                    material_code: parts[0] || "",
+                    quantity: parts[1] || "",
+                    unit_price: parts[2] || "",
+                    notes: parts[3] || "",
+                });
+            }
+        });
+        return rows;
+    };
+
+    const parseStoredRows = (rawValue, mode) => {
+        const payload = String(rawValue || "").trim();
+        if (!payload) return [];
+        if (payload.startsWith("[")) {
+            try {
+                const parsed = JSON.parse(payload);
+                if (Array.isArray(parsed)) {
+                    return parsed;
+                }
+            } catch (_error) {
+                // fallback to legacy format
+            }
+        }
+        return parseLegacyRows(payload, mode);
+    };
+
+    const stringifyRows = (rows, mode) => {
+        const normalize = (row) => {
+            if (mode === "ppe-lines") {
+                return {
+                    employee_number: String(row.employee_number || "").trim(),
+                    material_code: String(row.material_code || "").trim(),
+                    quantity: String(row.quantity || "").trim(),
+                    service_life_months: String(row.service_life_months || "").trim(),
+                };
+            }
+            return {
+                material_code: String(row.material_code || "").trim(),
+                quantity: String(row.quantity || "").trim(),
+                unit_price: String(row.unit_price || "").trim(),
+                notes: String(row.notes || "").trim(),
+            };
+        };
+
+        const normalizedRows = rows
+            .map(normalize)
+            .filter((row) => Object.values(row).some((value) => String(value || "").trim() !== ""));
+
+        return normalizedRows.length ? JSON.stringify(normalizedRows) : "";
+    };
+
+    const itemsHiddenInput = form.querySelector('input[name="items"][type="hidden"]');
+    const itemsGrid = form.querySelector("[data-items-grid]");
+    if (itemsHiddenInput && itemsGrid) {
+        const mode = itemsHiddenInput.dataset.itemsMode || "material-lines";
+        const tableHead = itemsGrid.querySelector("[data-items-head]");
+        const tableBody = itemsGrid.querySelector("[data-items-body]");
+        const addButton = itemsGrid.querySelector("[data-items-add]");
+        const clearButton = itemsGrid.querySelector("[data-items-clear]");
+
+        const storedRows = parseStoredRows(itemsHiddenInput.value, mode);
+
+        const readOnlyCell = (value = "") => {
+            const input = document.createElement("input");
+            input.type = "text";
+            input.value = value;
+            input.readOnly = true;
+            input.className = "is-readonly";
+            return input;
+        };
+
+        const editableCell = ({ type = "text", value = "", step = "", min = "", list = "", col = "" } = {}) => {
+            const input = document.createElement("input");
+            input.type = type;
+            input.value = value;
+            if (step) input.step = step;
+            if (min) input.min = min;
+            if (list) input.setAttribute("list", list);
+            if (col) input.dataset.col = col;
+            return input;
+        };
+
+        const buildHeader = () => {
+            const headers = mode === "ppe-lines"
+                ? ["Таб. номер", "Сотрудник", "Код", "Наименование", "Ед.", "Цена", "Кол-во", "Срок, мес", ""]
+                : ["Код", "Наименование", "Ед.", "Кол-во", "Цена", "Примечание", ""];
+            const row = document.createElement("tr");
+            headers.forEach((title) => {
+                const cell = document.createElement("th");
+                cell.textContent = title;
+                row.appendChild(cell);
+            });
+            tableHead.innerHTML = "";
+            tableHead.appendChild(row);
+        };
+
+        const readRows = () => {
+            return Array.from(tableBody.querySelectorAll("tr")).map((row) => {
+                if (mode === "ppe-lines") {
+                    return {
+                        employee_number: row.querySelector('input[data-col="employee_number"]')?.value || "",
+                        material_code: row.querySelector('input[data-col="material_code"]')?.value || "",
+                        quantity: row.querySelector('input[data-col="quantity"]')?.value || "",
+                        service_life_months: row.querySelector('input[data-col="service_life_months"]')?.value || "",
+                    };
+                }
+                return {
+                    material_code: row.querySelector('input[data-col="material_code"]')?.value || "",
+                    quantity: row.querySelector('input[data-col="quantity"]')?.value || "",
+                    unit_price: row.querySelector('input[data-col="unit_price"]')?.value || "",
+                    notes: row.querySelector('input[data-col="notes"]')?.value || "",
+                };
+            });
+        };
+
+        const syncHiddenItems = (triggerAutosave = true) => {
+            itemsHiddenInput.value = stringifyRows(readRows(), mode);
+            if (triggerAutosave) {
+                scheduleSave();
+            }
+        };
+
+        const createDeleteButton = (row) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "ghost-button row-remove-button";
+            button.textContent = "Удалить";
+            button.addEventListener("click", () => {
+                if (tableBody.children.length === 1) {
+                    row.querySelectorAll("input:not([readonly])").forEach((input) => {
+                        input.value = "";
+                    });
+                    row.querySelectorAll("input[readonly]").forEach((input) => {
+                        input.value = "";
+                    });
+                } else {
+                    row.remove();
+                }
+                syncHiddenItems();
+            });
+            return button;
+        };
+
+        const wireRowEvents = (row, onChange) => {
+            row.querySelectorAll("input:not([readonly])").forEach((input) => {
+                input.addEventListener("input", onChange);
+                input.addEventListener("change", onChange);
+            });
+        };
+
+        const createMaterialRow = (seed = {}) => {
+            const row = document.createElement("tr");
+            const codeInput = editableCell({ value: seed.material_code || "", list: "material-code-options", col: "material_code" });
+            const nameInput = readOnlyCell();
+            const unitInput = readOnlyCell();
+            const quantityInput = editableCell({ type: "number", value: seed.quantity || "", step: "0.001", min: "0", col: "quantity" });
+            const priceInput = editableCell({ type: "number", value: seed.unit_price || "", step: "0.01", min: "0", col: "unit_price" });
+            const notesInput = editableCell({ value: seed.notes || "", col: "notes" });
+
+            const fillFromMaterial = () => {
+                const material = materialIndex.get(normalizeCode(codeInput.value));
+                nameInput.value = material?.name || "";
+                unitInput.value = material?.unit || "";
+                if (material && !String(priceInput.value || "").trim()) {
+                    priceInput.value = material.price || "";
+                }
+            };
+
+            fillFromMaterial();
+            codeInput.addEventListener("change", fillFromMaterial);
+            codeInput.addEventListener("blur", fillFromMaterial);
+
+            [codeInput, nameInput, unitInput, quantityInput, priceInput, notesInput].forEach((input) => {
+                const cell = document.createElement("td");
+                cell.appendChild(input);
+                row.appendChild(cell);
+            });
+
+            const removeCell = document.createElement("td");
+            removeCell.appendChild(createDeleteButton(row));
+            row.appendChild(removeCell);
+
+            wireRowEvents(row, () => {
+                fillFromMaterial();
+                syncHiddenItems();
+            });
+
+            return row;
+        };
+
+        const createPpeRow = (seed = {}) => {
+            const row = document.createElement("tr");
+            const employeeInput = editableCell({ value: seed.employee_number || "", list: "worker-number-options", col: "employee_number" });
+            const employeeNameInput = readOnlyCell();
+            const codeInput = editableCell({ value: seed.material_code || "", list: "material-code-options", col: "material_code" });
+            const nameInput = readOnlyCell();
+            const unitInput = readOnlyCell();
+            const priceInput = readOnlyCell();
+            const quantityInput = editableCell({ type: "number", value: seed.quantity || "", step: "0.001", min: "0", col: "quantity" });
+            const serviceLifeInput = editableCell({ type: "number", value: seed.service_life_months || "", step: "1", min: "1", col: "service_life_months" });
+
+            const fillWorker = () => {
+                const worker = workerIndex.get(String(employeeInput.value || "").trim());
+                employeeNameInput.value = worker?.full_name || "";
+            };
+
+            const fillMaterial = () => {
+                const material = materialIndex.get(normalizeCode(codeInput.value));
+                nameInput.value = material?.name || "";
+                unitInput.value = material?.unit || "";
+                priceInput.value = material?.price || "";
+            };
+
+            fillWorker();
+            fillMaterial();
+            employeeInput.addEventListener("change", fillWorker);
+            employeeInput.addEventListener("blur", fillWorker);
+            codeInput.addEventListener("change", fillMaterial);
+            codeInput.addEventListener("blur", fillMaterial);
+
+            [employeeInput, employeeNameInput, codeInput, nameInput, unitInput, priceInput, quantityInput, serviceLifeInput].forEach((input) => {
+                const cell = document.createElement("td");
+                cell.appendChild(input);
+                row.appendChild(cell);
+            });
+
+            const removeCell = document.createElement("td");
+            removeCell.appendChild(createDeleteButton(row));
+            row.appendChild(removeCell);
+
+            wireRowEvents(row, () => {
+                fillWorker();
+                fillMaterial();
+                syncHiddenItems();
+            });
+
+            return row;
+        };
+
+        const createRow = (seed = {}) => (mode === "ppe-lines" ? createPpeRow(seed) : createMaterialRow(seed));
+
+        const renderRows = () => {
+            buildHeader();
+            tableBody.innerHTML = "";
+            const rows = storedRows.length ? storedRows : [{}];
+            rows.forEach((rowData) => {
+                tableBody.appendChild(createRow(rowData));
+            });
+            syncHiddenItems(false);
+        };
+
+        addButton?.addEventListener("click", () => {
+            tableBody.appendChild(createRow({}));
+            syncHiddenItems();
+        });
+
+        clearButton?.addEventListener("click", () => {
+            tableBody.innerHTML = "";
+            tableBody.appendChild(createRow({}));
+            syncHiddenItems();
+        });
+
+        form.addEventListener("submit", () => {
+            syncHiddenItems(false);
+        });
+
+        renderRows();
+    }
+
+    form.querySelectorAll("input, select, textarea").forEach((node) => {
+        if (node.type === "hidden" || node.type === "submit" || node.type === "file") {
+            return;
+        }
+        node.addEventListener("input", scheduleSave);
+        node.addEventListener("change", scheduleSave);
+    });
+})();
+</script>
+{% endblock %}

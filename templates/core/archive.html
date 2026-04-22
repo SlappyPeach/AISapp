@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="panel">
+    <div class="panel-head">
+        <h3>Фильтры архива</h3>
+    </div>
+    <form method="get" class="filter-grid">
+        {% for field in form %}
+            <div class="field">
+                <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {{ field }}
+            </div>
+        {% endfor %}
+        <button type="submit" class="primary-button">Применить</button>
+    </form>
+</section>
+
+<section class="panel">
+    <div class="panel-head">
+        <h3>Документы</h3>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Тип</th>
+                    <th>Номер</th>
+                    <th>Дата</th>
+                    <th>Контрагент</th>
+                    <th>Объект</th>
+                    <th>Статус</th>
+                    <th>&#1052;&#1072;&#1088;&#1096;&#1088;&#1091;&#1090;</th>
+                    <th>Действия</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for record in records %}
+                    <tr>
+                        <td>{{ record.doc_type }}</td>
+                        <td>{{ record.doc_number }}</td>
+                        <td>{{ record.doc_date }}</td>
+                        <td>{{ record.counterparty }}</td>
+                        <td>{{ record.object_name }}</td>
+                        <td>{{ record.get_status_display }}</td>
+                        <td>
+                            <div class="field-help">
+                                <div><strong>&#1057;&#1086;&#1079;&#1076;&#1072;&#1077;&#1090;:</strong> {{ record.metadata_json.workflow_created_by|default:"-" }}</div>
+                                <div><strong>&#1057;&#1086;&#1075;&#1083;&#1072;&#1089;&#1091;&#1077;&#1090;:</strong> {{ record.metadata_json.workflow_approved_by|default:"-" }}</div>
+                                <div><strong>&#1042; &#1073;&#1091;&#1093;&#1075;&#1072;&#1083;&#1090;&#1077;&#1088;&#1080;&#1102;:</strong> {{ record.metadata_json.workflow_sent_accounting_by|default:"-" }}</div>
+                                <div><strong>&#1058;&#1086;&#1083;&#1100;&#1082;&#1086; &#1089;&#1084;&#1086;&#1090;&#1088;&#1080;&#1090;:</strong> {{ record.metadata_json.workflow_view_only|default:"-" }}</div>
+                            </div>
+                        </td>
+                        <td>
+                            <div class="action-row">
+                                <a class="ghost-button" href="{% url 'export-document' record.entity_type record.entity_id %}">Экспорт</a>
+                                {% if record.can_update_status %}
+                                    <form method="post" class="inline-form">
+                                        {% csrf_token %}
+                                        <input type="hidden" name="record_id" value="{{ record.id }}">
+                                        <select name="new_status" class="form-input compact-input">
+                                            {% for value, label in record.available_status_choices %}
+                                                <option value="{{ value }}" {% if value == record.status %}selected{% endif %}>{{ label }}</option>
+                                            {% endfor %}
+                                        </select>
+                                        <button type="submit" class="secondary-button">Обновить</button>
+                                    </form>
+                                {% else %}
+                                    <span class="field-help">Нет доступных переходов</span>
+                                {% endif %}
+                            </div>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr><td colspan="8">По выбранным фильтрам ничего не найдено.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

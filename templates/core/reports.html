@@ -1,0 +1,49 @@
+﻿{% extends "base.html" %}
+
+{% block content %}
+<section class="panel">
+    <div class="panel-head">
+        <h3>Параметры отчета</h3>
+        <a class="ghost-button" href="{% url 'export-report' %}?{% if request.GET.urlencode %}{{ request.GET.urlencode }}{% else %}report=summary{% endif %}">Скачать XLSX</a>
+    </div>
+    <form method="get" class="filter-grid">
+        {% for field in form %}
+            <div class="field">
+                <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {{ field }}
+            </div>
+        {% endfor %}
+        <button type="submit" class="primary-button">Построить</button>
+    </form>
+</section>
+
+<section class="panel">
+    <div class="panel-head">
+        <h3>{{ report_title }}</h3>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    {% for header in headers %}
+                        <th>{{ header }}</th>
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in rows %}
+                    <tr{% if row.0|slice:":5" == "ИТОГО" %} style="font-weight: 600; background: #f4ede2;"{% endif %}>
+                        {% for cell in row %}
+                            <td>{{ cell }}</td>
+                        {% endfor %}
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="{% if headers %}{{ headers|length }}{% else %}1{% endif %}">Нет данных за выбранный период.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

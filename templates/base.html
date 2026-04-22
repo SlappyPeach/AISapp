@@ -1,0 +1,77 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% if title %}{{ title }} · {% endif %}АО «СТ-1»</title>
+    <link rel="stylesheet" href="{% static 'css/app.css' %}">
+</head>
+<body>
+    <div class="shell">
+        <aside class="sidebar">
+            <div class="brand">
+                <span class="brand-kicker">АО «СТ-1»</span>
+                <h1>АИС учета материалов</h1>
+            </div>
+            {% if request.user.is_authenticated %}
+                <nav class="menu">
+                    <a class="menu-link{% if request.path == dashboard_url %} is-active{% endif %}" href="{{ dashboard_url }}">Панель</a>
+                    <div class="menu-group">Справочники</div>
+                    {% for item in catalog_links %}
+                        <a class="menu-link{% if current_catalog == item.slug %} is-active{% endif %}" href="{{ item.url }}">{{ item.title }}</a>
+                    {% endfor %}
+                    <div class="menu-group">Операции</div>
+                    {% for item in operation_links %}
+                        <a class="menu-link{% if current_operation == item.slug %} is-active{% endif %}" href="{{ item.url }}">{{ item.title }}</a>
+                    {% endfor %}
+                    <div class="menu-group">Сервис</div>
+                    {% if can_access_archive %}
+                        <a class="menu-link{% if request.path == archive_url %} is-active{% endif %}" href="{{ archive_url }}">
+                            {% if request.user.role == "supplier" %}Мой архив{% else %}Архив{% endif %}
+                        </a>
+                    {% endif %}
+                    {% if can_access_reports %}
+                        <a class="menu-link{% if request.path == reports_url %} is-active{% endif %}" href="{{ reports_url }}">Отчеты</a>
+                    {% endif %}
+                    {% if can_access_backups %}
+                        <a class="menu-link{% if request.path == backups_url %} is-active{% endif %}" href="{{ backups_url }}">Резервные копии</a>
+                    {% endif %}
+                    {% if can_access_audit_log %}
+                        <a class="menu-link{% if request.path == audit_log_url %} is-active{% endif %}" href="{{ audit_log_url }}">Журнал действий</a>
+                    {% endif %}
+                </nav>
+            {% endif %}
+        </aside>
+
+        <main class="main">
+            <header class="topbar">
+                <div>
+                    <span class="eyebrow">Монтаж, склад, снабжение и архив</span>
+                    <h2>{{ title|default:"АИС" }}</h2>
+                </div>
+                {% if request.user.is_authenticated %}
+                    <div class="profile">
+                        <div class="profile-name">{{ request.user.full_name_or_username }}</div>
+                        <div class="profile-role">{{ request.user.role_label }}</div>
+                        <form action="{% url 'logout' %}" method="post">
+                            {% csrf_token %}
+                            <button type="submit" class="ghost-button">Выйти</button>
+                        </form>
+                    </div>
+                {% endif %}
+            </header>
+
+            {% if messages %}
+                <section class="messages">
+                    {% for message in messages %}
+                        <div class="message message-{{ message.tags|default:'info' }}">{{ message }}</div>
+                    {% endfor %}
+                </section>
+            {% endif %}
+
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+</body>
+</html>
