@@ -301,7 +301,7 @@ AIS_INITIAL_ADMIN_SITE_NAME=Главный офис
 ### Шаг 1. Откройте проект
 
 ```powershell
-cd "C:\Users\anast\Desktop\Доки по проекту\AISapp"
+cd "C:\Путь к проекту\AISapp"
 ```
 
 ### Шаг 2. Создайте виртуальное окружение
@@ -574,7 +574,7 @@ backups/
 Ниже минимальный рабочий сценарий для показа системы с нуля:
 
 ```powershell
-cd "C:\Users\anast\Desktop\Доки по проекту\AISapp"
+cd "C:\Путь к проекту\AISapp"
 python -m venv .venv
 & .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
