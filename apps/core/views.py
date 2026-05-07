@@ -17,7 +17,6 @@ from django.http import FileResponse, Http404, HttpRequest, HttpResponse, JsonRe
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
-from django.utils.html import format_html
 
 from .access import (
     ROLE_SET_ARCHIVE,
@@ -522,6 +521,20 @@ def _export_url(entity_type: str | None, item: Any) -> str:
     return reverse("export-document", kwargs={"entity_type": entity_type, "entity_id": item.pk})
 
 
+def _created_export_url(request: HttpRequest, config: dict[str, Any], queryset) -> str:
+    entity_type = config.get("entity_type")
+    raw_created_id = request.GET.get("created")
+    if not entity_type or not raw_created_id:
+        return ""
+    try:
+        created_id = int(raw_created_id)
+    except (TypeError, ValueError):
+        return ""
+    if not queryset.filter(pk=created_id).exists():
+        return ""
+    return reverse("export-document", kwargs={"entity_type": entity_type, "entity_id": created_id})
+
+
 def _catalog_rows(
     queryset,
     columns: list[tuple[str, Callable[[Any], Any]]],
@@ -778,15 +791,13 @@ def catalog_page(request: HttpRequest, slug: str) -> HttpResponse:
                 saved_object = form.save()
             entity_type = config.get("entity_type")
             if entity_type and getattr(saved_object, "pk", None):
-                export_url = reverse("export-document", kwargs={"entity_type": entity_type, "entity_id": saved_object.pk})
-                messages.success(
-                    request,
-                    format_html(
-                        '{} <a href="{}">Скачать Word</a>',
-                        "Запись обновлена." if instance else "Запись успешно сохранена.",
-                        export_url,
-                    ),
+                message = (
+                    "Запись обновлена. Word доступен для скачивания."
+                    if instance
+                    else "Запись успешно сохранена. Word доступен для скачивания."
                 )
+                messages.success(request, message)
+                return redirect(f"{reverse('catalog-page', kwargs={'slug': slug})}?created={saved_object.pk}")
             else:
                 messages.success(request, "Запись обновлена." if instance else "Запись успешно сохранена.")
             return redirect("catalog-page", slug=slug)
@@ -812,6 +823,7 @@ def catalog_page(request: HttpRequest, slug: str) -> HttpResponse:
         "catalog_has_actions": can_create or bool(config.get("entity_type")),
         "is_editing": instance is not None,
         "current_catalog": slug,
+        "created_export_url": _created_export_url(request, config, queryset),
     }
     return _render(request, "core/catalogs.html", context)
 
@@ -840,8 +852,8 @@ def operation_page(request: HttpRequest, slug: str) -> HttpResponse:
             clear_operation_draft(user=request.user, operation_slug=slug)
             entity_type = config.get("entity_type")
             if entity_type and getattr(created_document, "pk", None):
-                export_url = reverse("export-document", kwargs={"entity_type": entity_type, "entity_id": created_document.pk})
-                messages.success(request, format_html('Документ успешно создан. <a href="{}">Скачать Word</a>', export_url))
+                messages.success(request, "Документ успешно создан. Word доступен для скачивания.")
+                return redirect(f"{reverse('operation-page', kwargs={'slug': slug})}?created={created_document.pk}")
             else:
                 messages.success(request, "Документ успешно создан.")
             return redirect("operation-page", slug=slug)
@@ -871,6 +883,7 @@ def operation_page(request: HttpRequest, slug: str) -> HttpResponse:
         "items_mode": items_mode,
         "material_catalog": material_catalog,
         "worker_catalog": worker_catalog,
+        "created_export_url": _created_export_url(request, config, queryset),
     }
     return _render(request, "core/operation.html", context)
 
