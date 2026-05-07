@@ -641,6 +641,68 @@ class ViewSmokeTests(TestCase):
         response = self.client.get(reverse("dashboard"))
         self.assertEqual(response.status_code, 200)
 
+    def test_operation_creation_shows_immediate_word_download(self) -> None:
+        self.client.login(username="site", password="site123")
+
+        response = self.client.post(
+            reverse("operation-page", kwargs={"slug": "site-requests"}),
+            {
+                "request_date": timezone.localdate().isoformat(),
+                "site_name": self.site_manager.site_name,
+                "contract": self.contract.id,
+                "status": DocumentStatus.DRAFT,
+                "notes": "Сразу скачать Word",
+                "items": material_items(quantity="2", unit_price="100", notes="word"),
+            },
+            follow=True,
+        )
+
+        request = SiteMaterialRequest.objects.get(notes="Сразу скачать Word")
+        export_url = reverse("export-document", kwargs={"entity_type": "site_material_request", "entity_id": request.id})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["created_export_url"], export_url)
+        self.assertContains(response, "Word готов")
+        self.assertContains(response, export_url)
+
+    def test_documents_and_archive_are_separate_sections(self) -> None:
+        active_record = DocumentRecord.objects.create(
+            entity_type="manual",
+            entity_id=1,
+            doc_type="Тестовый документ",
+            doc_number="ACTIVE-001",
+            doc_date=timezone.localdate(),
+            status=DocumentStatus.DRAFT,
+            title="Активный документ",
+        )
+        archived_record = DocumentRecord.objects.create(
+            entity_type="manual",
+            entity_id=2,
+            doc_type="Тестовый документ",
+            doc_number="ARCH-001",
+            doc_date=timezone.localdate(),
+            status=DocumentStatus.ACCEPTED,
+            title="Закрытый документ",
+        )
+        future_closed_record = DocumentRecord.objects.create(
+            entity_type="manual",
+            entity_id=3,
+            doc_type="Тестовый документ",
+            doc_number="FUTURE-001",
+            doc_date=timezone.localdate() + timedelta(days=1),
+            status=DocumentStatus.ACCEPTED,
+            title="Будущий закрытый документ",
+        )
+
+        self.client.login(username="admin", password="admin123")
+        documents_response = self.client.get(reverse("documents"))
+        archive_response = self.client.get(reverse("archive"))
+
+        self.assertIn(active_record, documents_response.context["records"])
+        self.assertNotIn(archived_record, documents_response.context["records"])
+        self.assertIn(archived_record, archive_response.context["records"])
+        self.assertNotIn(active_record, archive_response.context["records"])
+        self.assertNotIn(future_closed_record, archive_response.context["records"])
+
     def test_login_page_uses_customer_branding(self) -> None:
         response = self.client.get(reverse("login"))
         self.assertEqual(response.status_code, 200)

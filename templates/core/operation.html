@@ -5,6 +5,18 @@
     <p>{{ description }}</p>
 </section>
 
+{% if created_export_url %}
+<section class="panel">
+    <div class="panel-head">
+        <h3>Word готов</h3>
+    </div>
+    <div class="action-row">
+        <a class="primary-button" href="{{ created_export_url }}">Скачать Word</a>
+        <a class="ghost-button" href="{{ documents_url }}">Документы в работе</a>
+    </div>
+</section>
+{% endif %}
+
 <section class="content-grid">
     <article class="panel">
         <div class="panel-head">

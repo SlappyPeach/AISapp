@@ -112,11 +112,9 @@ X_FRAME_OPTIONS = "DENY"
 EXPORTS_DIR = BASE_DIR / "exports"
 UPLOADS_DIR = BASE_DIR / "uploads"
 BACKUPS_DIR = BASE_DIR / "backups"
-DOCUMENT_TEMPLATES_DIR = Path(
-    os.environ.get("AIS_DOCUMENT_TEMPLATES_DIR", BASE_DIR.parent / "Шаблоны документов")
-)
+DOCUMENT_TEMPLATES_DIR = Path(os.environ.get("AIS_DOCUMENT_TEMPLATES_DIR", BASE_DIR / "document_templates"))
 
-for path in [EXPORTS_DIR, UPLOADS_DIR, BACKUPS_DIR, MEDIA_ROOT, BASE_DIR / "static", BASE_DIR / "templates"]:
+for path in [EXPORTS_DIR, UPLOADS_DIR, BACKUPS_DIR, MEDIA_ROOT, DOCUMENT_TEMPLATES_DIR, BASE_DIR / "static", BASE_DIR / "templates"]:
     path.mkdir(parents=True, exist_ok=True)
 
 REST_FRAMEWORK = {
