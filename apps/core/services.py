@@ -14,7 +14,7 @@ from django.db.models import DecimalField, Q, Sum, Value
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
-from .access import ACCOUNTING_VISIBLE_STATUSES, ROLE_SET_OFFICE
+from .access import ACCOUNTING_VISIBLE_STATUSES
 from .models import (
     AuditLog,
     ConstructionObject,
@@ -30,6 +30,8 @@ from .models import (
     PrimaryDocumentLine,
     ProcurementRequest,
     ProcurementRequestLine,
+    SiteMaterialRequest,
+    SiteMaterialRequestLine,
     SMRContract,
     StockIssue,
     StockIssueLine,
@@ -40,6 +42,7 @@ from .models import (
     SupplierDocument,
     SupplyContract,
     Worker,
+    WorkAcceptanceAct,
     WorkLog,
     WriteOffAct,
     WriteOffLine,
@@ -61,29 +64,6 @@ def _user_site_name(user) -> str:
     return (getattr(user, "site_name", "") or "").strip()
 
 
-def _site_name_variants(value: str | None) -> set[str]:
-    raw_value = (value or "").strip()
-    if not raw_value:
-        return set()
-
-    variants: set[str] = set()
-    pending = [raw_value]
-    while pending and len(variants) < 8:
-        current = pending.pop()
-        normalized = current.casefold()
-        if normalized in variants:
-            continue
-        variants.add(normalized)
-        for source_encoding, target_encoding in (("cp1251", "utf-8"), ("utf-8", "cp1251")):
-            try:
-                candidate = current.encode(source_encoding).decode(target_encoding).strip()
-            except (UnicodeEncodeError, UnicodeDecodeError, LookupError):
-                continue
-            if candidate and candidate.casefold() not in variants:
-                pending.append(candidate)
-    return variants
-
-
 def _scoped_site_name(*, user, site_name: str | None = None, fallback: str = "") -> str:
     resolved_site = (site_name or "").strip()
     if getattr(user, "role", None) != RoleChoices.SITE_MANAGER:
@@ -92,7 +72,7 @@ def _scoped_site_name(*, user, site_name: str | None = None, fallback: str = "")
     user_site = _user_site_name(user)
     if not user_site:
         raise ValueError("За начальником участка не закреплен контур участка.")
-    if resolved_site and _site_name_variants(resolved_site).isdisjoint(_site_name_variants(user_site)):
+    if resolved_site and resolved_site.casefold() != user_site.casefold():
         raise ValueError("Начальник участка может работать только в рамках своего участка.")
     return user_site
 
@@ -144,10 +124,16 @@ WORKFLOW_ROUTE_MAP: dict[str, dict[str, set[str]]] = {
         "viewers": {RoleChoices.SUPPLIER, RoleChoices.ACCOUNTING},
     },
     "procurement_request": {
-        "creators": {RoleChoices.ADMIN, RoleChoices.PROCUREMENT, RoleChoices.SITE_MANAGER},
+        "creators": {RoleChoices.ADMIN, RoleChoices.PROCUREMENT, RoleChoices.WAREHOUSE},
         "approvers": {RoleChoices.ADMIN, RoleChoices.DIRECTOR},
         "senders": {RoleChoices.ADMIN, RoleChoices.DIRECTOR},
         "viewers": {RoleChoices.SUPPLIER, RoleChoices.ACCOUNTING},
+    },
+    "site_material_request": {
+        "creators": {RoleChoices.ADMIN, RoleChoices.SITE_MANAGER},
+        "approvers": {RoleChoices.ADMIN, RoleChoices.WAREHOUSE},
+        "senders": {RoleChoices.ADMIN, RoleChoices.WAREHOUSE},
+        "viewers": {RoleChoices.PROCUREMENT},
     },
     "primary_document": {
         "creators": {RoleChoices.ADMIN, RoleChoices.PROCUREMENT, RoleChoices.WAREHOUSE},
@@ -181,7 +167,13 @@ WORKFLOW_ROUTE_MAP: dict[str, dict[str, set[str]]] = {
         "viewers": {RoleChoices.ACCOUNTING},
     },
     "ppe_issuance": {
-        "creators": {RoleChoices.ADMIN, RoleChoices.WAREHOUSE, RoleChoices.SITE_MANAGER},
+        "creators": {RoleChoices.ADMIN, RoleChoices.SITE_MANAGER},
+        "approvers": {RoleChoices.ADMIN, RoleChoices.DIRECTOR},
+        "senders": {RoleChoices.ADMIN, RoleChoices.DIRECTOR},
+        "viewers": {RoleChoices.ACCOUNTING},
+    },
+    "work_acceptance": {
+        "creators": {RoleChoices.ADMIN, RoleChoices.SITE_MANAGER},
         "approvers": {RoleChoices.ADMIN, RoleChoices.DIRECTOR},
         "senders": {RoleChoices.ADMIN, RoleChoices.DIRECTOR},
         "viewers": {RoleChoices.ACCOUNTING},
@@ -278,6 +270,15 @@ ENTITY_WORKFLOW_TRANSITIONS: dict[str, dict[str, dict[str, set[str]]]] = {}
 for _entity_type, _route in WORKFLOW_ROUTE_MAP.items():
     if _entity_type == "supplier_document":
         ENTITY_WORKFLOW_TRANSITIONS[_entity_type] = _build_supplier_document_transitions(_route)
+    elif _entity_type == "site_material_request":
+        ENTITY_WORKFLOW_TRANSITIONS[_entity_type] = {
+            DocumentStatus.DRAFT: {DocumentStatus.APPROVAL: _route["creators"]},
+            DocumentStatus.APPROVAL: {
+                DocumentStatus.ACCEPTED: _route["approvers"],
+                DocumentStatus.REWORK: _route["approvers"],
+            },
+            DocumentStatus.REWORK: {DocumentStatus.APPROVAL: _route["creators"]},
+        }
     else:
         ENTITY_WORKFLOW_TRANSITIONS[_entity_type] = _build_default_workflow_transitions(_route)
 SUPPLIER_DOCUMENT_TRANSITIONS = ENTITY_WORKFLOW_TRANSITIONS["supplier_document"]
@@ -351,10 +352,24 @@ def filter_queryset_for_user(user, queryset):
     if not role:
         return queryset.none()
 
-    if role in ROLE_SET_OFFICE:
+    model = queryset.model
+
+    if role in {RoleChoices.ADMIN, RoleChoices.DIRECTOR}:
         return queryset
 
-    model = queryset.model
+    if role == RoleChoices.PROCUREMENT:
+        if model in {Supplier, ConstructionObject, SupplyContract, ProcurementRequest, SupplierDocument, PrimaryDocument, SiteMaterialRequest}:
+            return queryset
+        if model is DocumentRecord:
+            return queryset.filter(entity_type__in=["procurement_request", "supplier_document", "primary_document", "supply_contract"])
+        return queryset.none()
+
+    if role == RoleChoices.WAREHOUSE:
+        if model in {Material, SiteMaterialRequest, StockReceipt, StockIssue, ProcurementRequest}:
+            return queryset
+        if model is DocumentRecord:
+            return queryset.filter(entity_type__in=["site_material_request", "stock_receipt", "stock_issue", "procurement_request"])
+        return queryset.none()
 
     if role == RoleChoices.ACCOUNTING:
         if model is DocumentRecord:
@@ -368,16 +383,22 @@ def filter_queryset_for_user(user, queryset):
             if site_name:
                 filters |= (
                     Q(procurement_requests__site_name__iexact=site_name)
+                    | Q(site_material_requests__site_name__iexact=site_name)
                     | Q(stock_issues__site_name__iexact=site_name)
                     | Q(write_off_acts__site_name__iexact=site_name)
+                    | Q(acceptance_acts__site_name__iexact=site_name)
                     | Q(work_logs__site_name__iexact=site_name)
                 )
             return queryset.filter(filters).distinct()
         if model is ProcurementRequest:
             filters = Q(requested_by=user)
             if site_name:
-                filters |= Q(site_name__iexact=site_name)
+                filters |= Q(site_name__iexact=site_name) | Q(site_request__site_name__iexact=site_name)
             return queryset.filter(filters).distinct()
+        if model is SiteMaterialRequest:
+            if not site_name:
+                return queryset.none()
+            return queryset.filter(site_name__iexact=site_name)
         if model is SupplierDocument:
             filters = Q(uploaded_by=user)
             if site_name:
@@ -388,11 +409,19 @@ def filter_queryset_for_user(user, queryset):
             if site_name:
                 filters |= Q(site_name__iexact=site_name) | Q(procurement_request__site_name__iexact=site_name)
             return queryset.filter(filters).distinct()
+        if model is Worker:
+            if not site_name:
+                return queryset.none()
+            return queryset.filter(site_name__iexact=site_name)
+        if model is WorkAcceptanceAct:
+            if not site_name:
+                return queryset.none()
+            return queryset.filter(site_name__iexact=site_name)
         if model is DocumentRecord:
             filters = Q(created_by=user)
             if site_name:
                 filters |= Q(metadata_json__site_name__iexact=site_name) | Q(object_name__iexact=site_name)
-            return queryset.filter(filters).distinct()
+            return queryset.filter(filters, entity_type__in=["site_material_request", "write_off", "ppe_issuance", "work_acceptance"]).distinct()
         if model in {StockIssue, WriteOffAct, PPEIssuance, WorkLog}:
             if not site_name:
                 return queryset.none()
@@ -420,15 +449,15 @@ def filter_queryset_for_user(user, queryset):
     return queryset.none()
 
 
-def _structured_rows(raw_text: str) -> list[dict[str, Any]] | None:
+def _item_rows_from_json(raw_text: str) -> list[dict[str, Any]]:
     payload = (raw_text or "").strip()
-    if not payload or not payload.startswith("["):
-        return None
+    if not payload:
+        return []
 
     try:
         data = json.loads(payload)
     except json.JSONDecodeError as exc:
-        raise ValueError("Некорректный структурированный список позиций.") from exc
+        raise ValueError("Позиции должны быть переданы как структурированный JSON-список.") from exc
 
     if not isinstance(data, list):
         raise ValueError("Структурированный список позиций должен быть списком.")
@@ -436,58 +465,36 @@ def _structured_rows(raw_text: str) -> list[dict[str, Any]] | None:
     rows: list[dict[str, Any]] = []
     for index, item in enumerate(data, start=1):
         if not isinstance(item, dict):
-            raise ValueError(f"Structured row #{index} has invalid format.")
+            raise ValueError(f"Строка #{index} должна быть объектом.")
         rows.append(item)
     return rows
 
 
 def parse_line_items(raw_text: str, *, require_price: bool = False) -> list[dict[str, Any]]:
-    structured_rows = _structured_rows(raw_text)
+    structured_rows = _item_rows_from_json(raw_text)
     lines: list[dict[str, Any]] = []
 
-    if structured_rows is not None:
-        for index, item in enumerate(structured_rows, start=1):
-            material_code = str(item.get("material_code", "")).strip()
-            quantity = decimalize(item.get("quantity"))
-            unit_price_raw = item.get("unit_price")
-            unit_price = decimalize(unit_price_raw) if unit_price_raw not in (None, "") else Decimal("0")
-            notes = str(item.get("notes", "") or "").strip()
-            line_ref = f"строка #{index}"
-            if not material_code:
-                raise ValueError(f"Код материала обязателен для {line_ref}.")
-            if quantity <= 0:
-                raise ValueError(f"Количество должно быть больше нуля для {line_ref}.")
-            if require_price and unit_price <= 0:
-                raise ValueError(f"Цена обязательна для {line_ref}.")
-            lines.append(
-                {
-                    "material_code": material_code,
-                    "quantity": quantity,
-                    "unit_price": unit_price,
-                    "notes": notes,
-                }
-            )
-    else:
-        for raw_line in raw_text.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            parts = [part.strip() for part in line.split("|")]
-            if len(parts) < 2:
-                raise ValueError(f"Некорректный формат строки: {line}")
-            item = {
-                "material_code": parts[0],
-                "quantity": decimalize(parts[1]),
-                "unit_price": decimalize(parts[2]) if len(parts) >= 3 and parts[2] else Decimal("0"),
-                "notes": parts[3] if len(parts) >= 4 else "",
+    for index, item in enumerate(structured_rows, start=1):
+        material_code = str(item.get("material_code", "")).strip()
+        quantity = decimalize(item.get("quantity"))
+        unit_price_raw = item.get("unit_price")
+        unit_price = decimalize(unit_price_raw) if unit_price_raw not in (None, "") else Decimal("0")
+        notes = str(item.get("notes", "") or "").strip()
+        line_ref = f"строка #{index}"
+        if not material_code:
+            raise ValueError(f"Код материала обязателен для {line_ref}.")
+        if quantity <= 0:
+            raise ValueError(f"Количество должно быть больше нуля для {line_ref}.")
+        if require_price and unit_price <= 0:
+            raise ValueError(f"Цена обязательна для {line_ref}.")
+        lines.append(
+            {
+                "material_code": material_code,
+                "quantity": quantity,
+                "unit_price": unit_price,
+                "notes": notes,
             }
-            if not item["material_code"]:
-                raise ValueError(f"Код материала обязателен в строке: {line}")
-            if item["quantity"] <= 0:
-                raise ValueError(f"Количество должно быть больше нуля в строке: {line}")
-            if require_price and item["unit_price"] <= 0:
-                raise ValueError(f"Цена обязательна в строке: {line}")
-            lines.append(item)
+        )
 
     if not lines:
         raise ValueError("Не указаны позиции документа.")
@@ -495,55 +502,39 @@ def parse_line_items(raw_text: str, *, require_price: bool = False) -> list[dict
 
 
 def parse_ppe_lines(raw_text: str) -> list[dict[str, Any]]:
-    structured_rows = _structured_rows(raw_text)
+    structured_rows = _item_rows_from_json(raw_text)
     lines: list[dict[str, Any]] = []
 
-    if structured_rows is not None:
-        for index, item in enumerate(structured_rows, start=1):
-            employee_number = str(item.get("employee_number", "")).strip()
-            material_code = str(item.get("material_code", "")).strip()
-            quantity = decimalize(item.get("quantity"))
-            service_life_months = int(decimalize(item.get("service_life_months")))
-            line_ref = f"строка #{index}"
-            if not employee_number:
-                raise ValueError(f"Табельный номер обязателен для {line_ref}.")
-            if not material_code:
-                raise ValueError(f"Код материала обязателен для {line_ref}.")
-            if quantity <= 0:
-                raise ValueError(f"Количество СИЗ должно быть больше нуля для {line_ref}.")
-            if service_life_months <= 0:
-                raise ValueError(f"Срок службы СИЗ должен быть больше нуля для {line_ref}.")
-            lines.append(
-                {
-                    "employee_number": employee_number,
-                    "material_code": material_code,
-                    "quantity": quantity,
-                    "service_life_months": service_life_months,
-                }
-            )
-    else:
-        for raw_line in raw_text.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            parts = [part.strip() for part in line.split("|")]
-            if len(parts) < 4:
-                raise ValueError("Формат строки СИЗ: табельный номер | код материала | количество | срок службы.")
-            item = {
-                "employee_number": parts[0],
-                "material_code": parts[1],
-                "quantity": decimalize(parts[2]),
-                "service_life_months": int(decimalize(parts[3])),
+    for index, item in enumerate(structured_rows, start=1):
+        employee_number = str(item.get("employee_number", "")).strip()
+        worker_name = str(item.get("worker_name", "")).strip()
+        material_code = str(item.get("material_code", "")).strip()
+        material_name = str(item.get("material_name", "")).strip()
+        quantity = decimalize(item.get("quantity"))
+        service_life_months = int(decimalize(item.get("service_life_months")))
+        clothing_size = str(item.get("clothing_size", "") or "").strip()
+        shoe_size = str(item.get("shoe_size", "") or "").strip()
+        line_ref = f"строка #{index}"
+        if not employee_number and not worker_name:
+            raise ValueError(f"ФИО работника или табельный номер обязательны для {line_ref}.")
+        if not material_code and not material_name:
+            raise ValueError(f"Наименование или код спецодежды обязательны для {line_ref}.")
+        if quantity <= 0:
+            raise ValueError(f"Количество СИЗ должно быть больше нуля для {line_ref}.")
+        if service_life_months <= 0:
+            raise ValueError(f"Срок службы СИЗ должен быть больше нуля для {line_ref}.")
+        lines.append(
+            {
+                "employee_number": employee_number,
+                "worker_name": worker_name,
+                "material_code": material_code,
+                "material_name": material_name,
+                "quantity": quantity,
+                "service_life_months": service_life_months,
+                "clothing_size": clothing_size,
+                "shoe_size": shoe_size,
             }
-            if not item["employee_number"]:
-                raise ValueError(f"Табельный номер обязателен в строке: {line}")
-            if not item["material_code"]:
-                raise ValueError(f"Код материала обязателен в строке: {line}")
-            if item["quantity"] <= 0:
-                raise ValueError(f"Количество СИЗ должно быть больше нуля в строке: {line}")
-            if item["service_life_months"] <= 0:
-                raise ValueError(f"Срок службы СИЗ должен быть больше нуля в строке: {line}")
-            lines.append(item)
+        )
 
     if not lines:
         raise ValueError("Не указаны позиции выдачи спецодежды.")
@@ -676,6 +667,50 @@ def _primary_document_line_items(cleaned_data: dict[str, Any], *, document_type:
     return []
 
 
+def _site_request_line_items(site_request: SiteMaterialRequest | None) -> list[dict[str, Any]]:
+    if not site_request:
+        return []
+    return [
+        {
+            "material_code": line.material.code,
+            "quantity": line.quantity,
+            "unit_price": line.unit_price,
+            "notes": line.notes,
+        }
+        for line in site_request.lines.select_related("material")
+    ]
+
+
+def _line_items_from_text_or_site_request(cleaned_data: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_items = (cleaned_data.get("items") or "").strip()
+    if raw_items:
+        return parse_line_items(raw_items)
+    line_items = _site_request_line_items(cleaned_data.get("site_request"))
+    if line_items:
+        return line_items
+    raise ValueError("Заполните позиции или выберите заявку участка.")
+
+
+def _stock_receipt_line_items(cleaned_data: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_items = (cleaned_data.get("items") or "").strip()
+    if raw_items:
+        return parse_line_items(raw_items)
+
+    primary_document = cleaned_data.get("primary_document")
+    if primary_document:
+        return [
+            {
+                "material_code": line.material.code,
+                "quantity": line.quantity,
+                "unit_price": line.unit_price,
+                "notes": line.notes,
+            }
+            for line in primary_document.lines.select_related("material")
+        ]
+
+    raise ValueError("Заполните позиции или выберите товарную накладную / УПД.")
+
+
 def _primary_document_supplier(*, cleaned_data: dict[str, Any], user) -> Supplier:
     request = cleaned_data.get("request")
     supply_contract = cleaned_data.get("supply_contract")
@@ -725,7 +760,7 @@ def _primary_document_basis_reference(cleaned_data: dict[str, Any]) -> str:
 
 
 @transaction.atomic
-def create_procurement_request(*, user, cleaned_data: dict[str, Any], ip_address: str | None = None) -> ProcurementRequest:
+def create_site_material_request(*, user, cleaned_data: dict[str, Any], ip_address: str | None = None) -> SiteMaterialRequest:
     cleaned_data = {
         **cleaned_data,
         "site_name": _scoped_site_name(
@@ -734,17 +769,52 @@ def create_procurement_request(*, user, cleaned_data: dict[str, Any], ip_address
             fallback=getattr(user, "site_name", "") or "Участок",
         ),
     }
-    request = ProcurementRequest.objects.create(
-        number=generate_number("REQ"),
+    request = SiteMaterialRequest.objects.create(
+        number=generate_number("SMR-REQ"),
         request_date=cleaned_data["request_date"],
-        site_name=cleaned_data["site_name"] or getattr(user, "site_name", "") or "Участок",
+        site_name=cleaned_data["site_name"],
         contract=cleaned_data.get("contract"),
-        supplier=cleaned_data.get("supplier"),
         requested_by=user,
         status=validate_initial_document_status(cleaned_data["status"]),
         notes=cleaned_data.get("notes", ""),
     )
     for item in parse_line_items(cleaned_data["items"]):
+        material = _get_material_or_raise(item["material_code"])
+        SiteMaterialRequestLine.objects.create(
+            request=request,
+            material=material,
+            quantity=item["quantity"],
+            unit_price=item["unit_price"] or material.price,
+            notes=item["notes"],
+        )
+    audit(user, "create", "site_material_request", request.id, f"Создана заявка участка {request.number}", ip_address)
+    return request
+
+
+@transaction.atomic
+def create_procurement_request(*, user, cleaned_data: dict[str, Any], ip_address: str | None = None) -> ProcurementRequest:
+    site_request = cleaned_data.get("site_request")
+    cleaned_data = {
+        **cleaned_data,
+        "site_name": _scoped_site_name(
+            user=user,
+            site_name=cleaned_data.get("site_name") or (site_request.site_name if site_request else ""),
+            fallback=getattr(user, "site_name", "") or "Участок",
+        ),
+    }
+    line_items = _line_items_from_text_or_site_request(cleaned_data)
+    request = ProcurementRequest.objects.create(
+        number=generate_number("REQ"),
+        request_date=cleaned_data["request_date"],
+        site_name=cleaned_data["site_name"] or getattr(user, "site_name", "") or "Участок",
+        contract=cleaned_data.get("contract") or (site_request.contract if site_request else None),
+        site_request=site_request,
+        supplier=cleaned_data.get("supplier"),
+        requested_by=user,
+        status=validate_initial_document_status(cleaned_data["status"]),
+        notes=cleaned_data.get("notes", ""),
+    )
+    for item in line_items:
         material = _get_material_or_raise(item["material_code"])
         ProcurementRequestLine.objects.create(
             request=request,
@@ -840,17 +910,23 @@ def create_primary_document(*, user, cleaned_data: dict[str, Any], ip_address: s
 
 @transaction.atomic
 def create_stock_receipt(*, user, cleaned_data: dict[str, Any], ip_address: str | None = None) -> StockReceipt:
-    line_items = parse_line_items(cleaned_data["items"])
-    supplier = cleaned_data["supplier"]
+    line_items = _stock_receipt_line_items(cleaned_data)
+    primary_document = cleaned_data.get("primary_document")
+    supplier = cleaned_data.get("supplier") or (primary_document.supplier if primary_document else None)
+    if not supplier:
+        raise ValueError("Не удалось определить поставщика для приходного ордера.")
     supplier_document = cleaned_data.get("supplier_document")
     if supplier_document and supplier_document.supplier_id != supplier.id:
         raise ValueError("Документ поставщика должен принадлежать выбранному поставщику.")
+    if primary_document and primary_document.supplier_id != supplier.id:
+        raise ValueError("Товарная накладная должна принадлежать выбранному поставщику.")
 
     receipt = StockReceipt.objects.create(
         number=generate_number("REC"),
         receipt_date=cleaned_data["receipt_date"],
         supplier=supplier,
         supplier_document=supplier_document,
+        primary_document=primary_document,
         created_by=user,
         status=validate_initial_document_status(cleaned_data["status"]),
         notes=cleaned_data.get("notes", ""),
@@ -876,7 +952,8 @@ def create_stock_receipt(*, user, cleaned_data: dict[str, Any], ip_address: str 
 
 @transaction.atomic
 def create_stock_issue(*, user, cleaned_data: dict[str, Any], ip_address: str | None = None) -> StockIssue:
-    line_items = parse_line_items(cleaned_data["items"])
+    site_request = cleaned_data.get("site_request")
+    line_items = _line_items_from_text_or_site_request(cleaned_data)
     resolved_items: list[tuple[Material, dict[str, Any], Decimal]] = []
     for item in line_items:
         material = _get_material_or_raise(item["material_code"])
@@ -888,11 +965,17 @@ def create_stock_issue(*, user, cleaned_data: dict[str, Any], ip_address: str | 
         )
         resolved_items.append((material, item, item["unit_price"] or material.price))
 
+    issue_site_name = cleaned_data.get("site_name") or (site_request.site_name if site_request else "")
+    if not issue_site_name:
+        raise ValueError("Укажите участок или выберите заявку участка.")
+
     issue = StockIssue.objects.create(
         number=generate_number("ISS"),
         issue_date=cleaned_data["issue_date"],
-        site_name=cleaned_data["site_name"],
-        contract=cleaned_data.get("contract"),
+        site_name=issue_site_name,
+        contract=cleaned_data.get("contract") or (site_request.contract if site_request else None),
+        site_request=site_request,
+        stock_receipt=cleaned_data.get("stock_receipt"),
         issued_by=user,
         received_by_name=cleaned_data["received_by_name"],
         status=validate_initial_document_status(cleaned_data["status"]),
@@ -929,11 +1012,18 @@ def create_stock_issue(*, user, cleaned_data: dict[str, Any], ip_address: str | 
 @transaction.atomic
 def create_writeoff(*, user, cleaned_data: dict[str, Any], ip_address: str | None = None) -> WriteOffAct:
     cleaned_data = {**cleaned_data, "site_name": _scoped_site_name(user=user, site_name=cleaned_data.get("site_name"))}
-    work_volume = cleaned_data["work_volume"]
+    contract = cleaned_data["contract"]
+    work_type = (cleaned_data.get("work_type") or contract.work_type or "").strip()
+    work_volume = cleaned_data.get("work_volume") or contract.planned_volume
+    volume_unit = (cleaned_data.get("volume_unit") or contract.volume_unit or "").strip()
+    if not work_type:
+        raise ValueError("Укажите вид работ или заполните его в договоре СМР.")
+    if work_volume is None:
+        raise ValueError("Укажите объем работ или заполните плановый объем в договоре СМР.")
     if work_volume <= 0:
         raise ValueError("Объем работ должен быть больше нуля.")
 
-    norms = list(MaterialNorm.objects.select_related("material").filter(work_type=cleaned_data["work_type"]).order_by("material__code"))
+    norms = list(MaterialNorm.objects.select_related("material").filter(work_type=work_type).order_by("material__code"))
     if not norms:
         raise ValueError("Для выбранного вида работ не настроены нормы расхода материалов.")
 
@@ -951,11 +1041,11 @@ def create_writeoff(*, user, cleaned_data: dict[str, Any], ip_address: str | Non
     act = WriteOffAct.objects.create(
         number=generate_number("WO"),
         act_date=cleaned_data["act_date"],
-        contract=cleaned_data["contract"],
+        contract=contract,
         site_name=cleaned_data["site_name"],
-        work_type=cleaned_data["work_type"],
+        work_type=work_type,
         work_volume=work_volume,
-        volume_unit=cleaned_data.get("volume_unit", ""),
+        volume_unit=volume_unit,
         created_by=user,
         status=validate_initial_document_status(cleaned_data["status"]),
         notes=cleaned_data.get("notes", ""),
@@ -990,15 +1080,24 @@ def create_ppe_issuance(*, user, cleaned_data: dict[str, Any], ip_address: str |
     cleaned_data = {**cleaned_data, "site_name": _scoped_site_name(user=user, site_name=cleaned_data.get("site_name"))}
     prepared_lines: list[tuple[Worker, Material, dict[str, Any]]] = []
     for item in parse_ppe_lines(cleaned_data["items"]):
-        worker = Worker.objects.filter(employee_number=item["employee_number"]).first()
-        material = Material.objects.filter(code=item["material_code"], is_ppe=True).first()
+        worker_lookup = (item.get("employee_number") or item.get("worker_name") or "").strip()
+        material_lookup = (item.get("material_code") or item.get("material_name") or "").strip()
+        worker = Worker.objects.filter(Q(employee_number__iexact=worker_lookup) | Q(full_name__iexact=worker_lookup)).first()
+        if not worker and item.get("worker_name"):
+            worker = Worker.objects.filter(full_name__iexact=item["worker_name"]).first()
+        material = Material.objects.filter(
+            Q(code__iexact=material_lookup) | Q(name__iexact=material_lookup),
+            is_ppe=True,
+        ).first()
+        if not material and item.get("material_name"):
+            material = Material.objects.filter(name__iexact=item["material_name"], is_ppe=True).first()
         if not worker:
-            raise ValueError(f"Работник с табельным номером {item['employee_number']} не найден.")
+            raise ValueError(f"Работник {worker_lookup} не найден.")
         if not material:
-            raise ValueError(f"Материал {item['material_code']} не найден в перечне СИЗ.")
+            raise ValueError(f"Материал {material_lookup} не найден в перечне СИЗ.")
         if getattr(user, "role", None) == RoleChoices.SITE_MANAGER:
             worker_site_name = (worker.site_name or "").strip()
-            if _site_name_variants(worker_site_name).isdisjoint(_site_name_variants(cleaned_data["site_name"])):
+            if worker_site_name.casefold() != cleaned_data["site_name"].casefold():
                 raise ValueError("Начальник участка может оформлять спецодежду только сотрудникам своего участка.")
         _ensure_available_stock(
             material=material,
@@ -1025,6 +1124,8 @@ def create_ppe_issuance(*, user, cleaned_data: dict[str, Any], ip_address: str |
             quantity=item["quantity"],
             service_life_months=item["service_life_months"],
             issue_start_date=issuance.issue_date,
+            clothing_size=item.get("clothing_size", ""),
+            shoe_size=item.get("shoe_size", ""),
         )
         StockMovement.objects.create(
             movement_date=issuance.issue_date,
@@ -1039,6 +1140,31 @@ def create_ppe_issuance(*, user, cleaned_data: dict[str, Any], ip_address: str |
         )
     audit(user, "create", "ppe_issuance", issuance.id, f"Создана выдача спецодежды {issuance.number}", ip_address)
     return issuance
+
+
+@transaction.atomic
+def create_work_acceptance(*, user, cleaned_data: dict[str, Any], ip_address: str | None = None) -> WorkAcceptanceAct:
+    contract = cleaned_data["contract"]
+    site_name = _scoped_site_name(
+        user=user,
+        site_name=cleaned_data.get("site_name"),
+        fallback=contract.object.name if contract.object else getattr(user, "site_name", "") or "Участок",
+    )
+    act = WorkAcceptanceAct.objects.create(
+        number=generate_number("ACC"),
+        act_date=cleaned_data["act_date"],
+        contract=contract,
+        site_name=site_name,
+        work_description=cleaned_data.get("work_description") or contract.subject,
+        accepted_volume=cleaned_data.get("accepted_volume") or contract.planned_volume,
+        volume_unit=cleaned_data.get("volume_unit") or contract.volume_unit,
+        amount=cleaned_data.get("amount") or contract.amount,
+        created_by=user,
+        status=validate_initial_document_status(cleaned_data["status"]),
+        notes=cleaned_data.get("notes", ""),
+    )
+    audit(user, "create", "work_acceptance", act.id, f"Создан акт сдачи-приемки {act.number}", ip_address)
+    return act
 
 
 def create_work_log(*, user, cleaned_data: dict[str, Any], ip_address: str | None = None) -> WorkLog:
@@ -1088,6 +1214,7 @@ def transition_document(*, user, record: DocumentRecord, new_status: str, ip_add
     model_map = {
         "smr_contract": SMRContract,
         "supply_contract": SupplyContract,
+        "site_material_request": SiteMaterialRequest,
         "procurement_request": ProcurementRequest,
         "primary_document": PrimaryDocument,
         "supplier_document": SupplierDocument,
@@ -1095,6 +1222,7 @@ def transition_document(*, user, record: DocumentRecord, new_status: str, ip_add
         "stock_issue": StockIssue,
         "write_off": WriteOffAct,
         "ppe_issuance": PPEIssuance,
+        "work_acceptance": WorkAcceptanceAct,
     }
     model_class = model_map.get(record.entity_type)
     if not model_class:
@@ -1115,6 +1243,9 @@ def transition_document(*, user, record: DocumentRecord, new_status: str, ip_add
             instance.save(update_fields=["status"])
         if previous_status != status:
             audit(user, "status_change", record.entity_type, instance.pk, f"{previous_status} -> {status}", ip_address)
+        if record.entity_type == "work_acceptance" and status == DocumentStatus.ACCEPTED and instance.contract.status != DocumentStatus.ACCEPTED:
+            instance.contract.status = DocumentStatus.ACCEPTED
+            instance.contract.save(update_fields=["status", "updated_at"])
     return DocumentRecord.objects.get(pk=record.pk)
 
 
@@ -1233,13 +1364,7 @@ def dashboard_metrics(*, user=None) -> dict[str, int]:
     if role == RoleChoices.SITE_MANAGER:
         site_name = _user_site_name(user)
         scoped_records = filter_queryset_for_user(user, DocumentRecord.objects.all())
-        related_contracts = SMRContract.objects.filter(
-            Q(created_by=user)
-            | Q(procurement_requests__site_name__iexact=site_name)
-            | Q(stock_issues__site_name__iexact=site_name)
-            | Q(write_off_acts__site_name__iexact=site_name)
-            | Q(work_logs__site_name__iexact=site_name)
-        ).distinct()
+        related_contracts = filter_queryset_for_user(user, SMRContract.objects.all())
         return {
             "contracts": related_contracts.count(),
             "pending": scoped_records.filter(
@@ -1267,6 +1392,15 @@ def dashboard_metrics(*, user=None) -> dict[str, int]:
             "site_tasks": 0,
             "alerts": 0,
         }
+    if role == RoleChoices.PROCUREMENT:
+        scoped_records = filter_queryset_for_user(user, DocumentRecord.objects.all())
+        return {
+            "contracts": SupplyContract.objects.count(),
+            "pending": scoped_records.exclude(status=DocumentStatus.ACCEPTED).count(),
+            "supplier_docs": scoped_records.filter(entity_type__in=["supplier_document", "primary_document"]).count(),
+            "site_tasks": ProcurementRequest.objects.filter(site_request__isnull=False).count(),
+            "alerts": SiteMaterialRequest.objects.filter(status__in=[DocumentStatus.DRAFT, DocumentStatus.APPROVAL, DocumentStatus.REWORK]).count(),
+        }
     return {
         "contracts": SMRContract.objects.count(),
         "pending": DocumentRecord.objects.filter(
@@ -1284,137 +1418,32 @@ def dashboard_metrics(*, user=None) -> dict[str, int]:
     }
 
 
-def report_period(filters: dict[str, Any]) -> tuple[date, date]:
-    return filters.get("date_from") or today().replace(day=1), filters.get("date_to") or today()
-
-
-def report_stock(filters: dict[str, Any]) -> list[dict[str, Any]]:
-    return warehouse_balances()
-
-
-def report_purchases(filters: dict[str, Any]) -> list[dict[str, Any]]:
-    date_from, date_to = report_period(filters)
-    qs = SupplierDocument.objects.select_related("supplier", "request").filter(doc_date__range=(date_from, date_to)).order_by("-doc_date")
-    return [
-        {
-            "doc_date": item.doc_date.isoformat(),
-            "doc_type": item.doc_type,
-            "doc_number": item.doc_number,
-            "supplier_name": item.supplier.name,
-            "amount": float(item.amount),
-            "vat_amount": float(item.vat_amount),
-            "request_number": item.request.number if item.request else "-",
-        }
-        for item in qs
-    ]
-
-
-def report_writeoffs(filters: dict[str, Any]) -> list[dict[str, Any]]:
-    date_from, date_to = report_period(filters)
-    qs = WriteOffLine.objects.select_related("act__contract__object", "material").filter(act__act_date__range=(date_from, date_to)).order_by(
-        "-act__act_date", "material__code"
-    )
-    return [
-        {
-            "act_date": line.act.act_date.isoformat(),
-            "number": line.act.number,
-            "contract_number": line.act.contract.number,
-            "object_name": line.act.contract.object.name if line.act.contract.object else "",
-            "work_type": line.act.work_type,
-            "material_code": line.material.code,
-            "material_name": line.material.name,
-            "actual_quantity": float(line.actual_quantity),
-            "unit": line.material.unit,
-        }
-        for line in qs
-    ]
-
-
-def report_work(filters: dict[str, Any]) -> list[dict[str, Any]]:
-    date_from, date_to = report_period(filters)
-    qs = WorkLog.objects.select_related("contract").filter(
-        Q(actual_date__range=(date_from, date_to)) | Q(plan_date__range=(date_from, date_to))
-    ).order_by("-actual_date", "-plan_date")
-    return [
-        {
-            "site_name": log.site_name,
-            "contract_number": log.contract.number if log.contract else "",
-            "work_type": log.work_type,
-            "planned_volume": float(log.planned_volume),
-            "actual_volume": float(log.actual_volume),
-            "volume_unit": log.volume_unit,
-            "plan_date": log.plan_date.isoformat() if log.plan_date else "",
-            "actual_date": log.actual_date.isoformat() if log.actual_date else "",
-            "status": log.status,
-        }
-        for log in qs
-    ]
-
-
-def report_summary(filters: dict[str, Any]) -> list[dict[str, Any]]:
-    date_from, date_to = report_period(filters)
-    rows: list[dict[str, Any]] = []
-    for contract in SMRContract.objects.filter(contract_date__range=(date_from, date_to)):
-        rows.append(
-            {
-                "section": "Договор СМР",
-                "item": contract.number,
-                "amount": float(contract.amount),
-                "status": contract.status,
-                "event_date": contract.contract_date.isoformat(),
-            }
-        )
-    for doc in SupplierDocument.objects.filter(doc_date__range=(date_from, date_to)):
-        rows.append(
-            {
-                "section": "Документы поставщиков",
-                "item": doc.doc_number,
-                "amount": float(doc.amount),
-                "status": doc.status,
-                "event_date": doc.doc_date.isoformat(),
-            }
-        )
-    for doc in PrimaryDocument.objects.select_related("document_type").filter(doc_date__range=(date_from, date_to)):
-        rows.append(
-            {
-                "section": doc.document_type.name,
-                "item": doc.number,
-                "amount": float(doc.amount),
-                "status": doc.status,
-                "event_date": doc.doc_date.isoformat(),
-            }
-        )
-    for act in WriteOffAct.objects.filter(act_date__range=(date_from, date_to)):
-        rows.append(
-            {
-                "section": "Акты списания",
-                "item": act.number,
-                "amount": float(act.work_volume),
-                "status": act.status,
-                "event_date": act.act_date.isoformat(),
-            }
-        )
-    return sorted(rows, key=lambda item: item["event_date"], reverse=True)
-
-
-def report_ppe(filters: dict[str, Any]) -> list[dict[str, Any]]:
-    return ppe_replacement_alerts(filters=filters)
-
-
-REPORT_PROVIDERS = {
-    "stock": report_stock,
-    "purchases": report_purchases,
-    "writeoffs": report_writeoffs,
-    "work": report_work,
-    "summary": report_summary,
-    "ppe": report_ppe,
+ARCHIVE_ENTITY_TYPES_BY_ROLE = {
+    RoleChoices.SITE_MANAGER: {"site_material_request", "write_off", "ppe_issuance"},
+    RoleChoices.PROCUREMENT: {"procurement_request", "supplier_document", "primary_document"},
+    RoleChoices.WAREHOUSE: {"procurement_request", "stock_receipt", "stock_issue"},
+    RoleChoices.SUPPLIER: {"procurement_request", "supplier_document", "primary_document"},
 }
 
 
-def document_records(filters: dict[str, Any], *, user=None) -> list[DocumentRecord]:
+def document_records(
+    filters: dict[str, Any],
+    *,
+    user=None,
+    archived_only: bool = False,
+    active_only: bool = False,
+) -> list[DocumentRecord]:
     qs = DocumentRecord.objects.select_related("created_by").all()
     if user is not None:
         qs = filter_queryset_for_user(user, qs)
+    if archived_only:
+        qs = qs.filter(status=DocumentStatus.ACCEPTED, doc_date__lte=today())
+        role = getattr(user, "role", None)
+        allowed_entity_types = ARCHIVE_ENTITY_TYPES_BY_ROLE.get(role)
+        if allowed_entity_types:
+            qs = qs.filter(entity_type__in=allowed_entity_types)
+    if active_only:
+        qs = qs.exclude(status=DocumentStatus.ACCEPTED)
     if filters.get("doc_type"):
         qs = qs.filter(doc_type__icontains=filters["doc_type"])
     if filters.get("doc_number"):
@@ -1452,6 +1481,8 @@ def _backup_model_tables() -> list[tuple[str, Any]]:
         ("norms", MaterialNorm),
         ("contracts", SMRContract),
         ("supply_contracts", SupplyContract),
+        ("site_material_requests", SiteMaterialRequest),
+        ("site_material_request_lines", SiteMaterialRequestLine),
         ("procurement_requests", ProcurementRequest),
         ("procurement_request_lines", ProcurementRequestLine),
         ("supplier_documents", SupplierDocument),
@@ -1462,6 +1493,7 @@ def _backup_model_tables() -> list[tuple[str, Any]]:
         ("stock_issues", StockIssue),
         ("stock_issue_lines", StockIssueLine),
         ("work_logs", WorkLog),
+        ("work_acceptance_acts", WorkAcceptanceAct),
         ("write_off_acts", WriteOffAct),
         ("write_off_lines", WriteOffLine),
         ("ppe_issuances", PPEIssuance),

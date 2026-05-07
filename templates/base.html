@@ -26,6 +26,9 @@
                         <a class="menu-link{% if current_operation == item.slug %} is-active{% endif %}" href="{{ item.url }}">{{ item.title }}</a>
                     {% endfor %}
                     <div class="menu-group">Сервис</div>
+                    {% if can_access_documents %}
+                        <a class="menu-link{% if request.path == documents_url %} is-active{% endif %}" href="{{ documents_url }}">Документы в работе</a>
+                    {% endif %}
                     {% if can_access_archive %}
                         <a class="menu-link{% if request.path == archive_url %} is-active{% endif %}" href="{{ archive_url }}">
                             {% if request.user.role == "supplier" %}Мой архив{% else %}Архив{% endif %}

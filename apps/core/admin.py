@@ -13,6 +13,8 @@ from .models import (
     PPEIssuanceLine,
     ProcurementRequest,
     ProcurementRequestLine,
+    SiteMaterialRequest,
+    SiteMaterialRequestLine,
     SMRContract,
     StockIssue,
     StockIssueLine,
@@ -24,6 +26,7 @@ from .models import (
     SupplyContract,
     User,
     Worker,
+    WorkAcceptanceAct,
     WorkLog,
     WriteOffAct,
     WriteOffLine,
@@ -32,6 +35,11 @@ from .models import (
 
 class ProcurementLineInline(admin.TabularInline):
     model = ProcurementRequestLine
+    extra = 0
+
+
+class SiteMaterialRequestLineInline(admin.TabularInline):
+    model = SiteMaterialRequestLine
     extra = 0
 
 
@@ -109,10 +117,18 @@ class SupplyContractAdmin(admin.ModelAdmin):
 
 @admin.register(ProcurementRequest)
 class ProcurementRequestAdmin(admin.ModelAdmin):
-    list_display = ("number", "request_date", "site_name", "supplier", "status")
+    list_display = ("number", "request_date", "site_name", "site_request", "supplier", "status")
     search_fields = ("number", "site_name", "supplier__name")
     list_filter = ("status",)
     inlines = [ProcurementLineInline]
+
+
+@admin.register(SiteMaterialRequest)
+class SiteMaterialRequestAdmin(admin.ModelAdmin):
+    list_display = ("number", "request_date", "site_name", "contract", "status")
+    search_fields = ("number", "site_name", "contract__number")
+    list_filter = ("status",)
+    inlines = [SiteMaterialRequestLineInline]
 
 
 @admin.register(SupplierDocument)
@@ -142,6 +158,13 @@ class StockIssueAdmin(admin.ModelAdmin):
 class WorkLogAdmin(admin.ModelAdmin):
     list_display = ("site_name", "work_type", "plan_date", "actual_date", "status")
     search_fields = ("site_name", "work_type")
+    list_filter = ("status",)
+
+
+@admin.register(WorkAcceptanceAct)
+class WorkAcceptanceActAdmin(admin.ModelAdmin):
+    list_display = ("number", "act_date", "site_name", "contract", "amount", "status")
+    search_fields = ("number", "site_name", "contract__number")
     list_filter = ("status",)
 
 

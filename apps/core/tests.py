@@ -1,8 +1,10 @@
 ﻿from __future__ import annotations
 
+import json
 from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
+from zipfile import ZipFile
 
 from django.conf import settings
 from django.core.management import call_command
@@ -11,6 +13,7 @@ from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
+from .exports import Exporter
 from .forms import MaterialForm, ProcurementRequestCreateForm, SupplierForm, UserForm
 from .models import (
     AuditLog,
@@ -23,6 +26,7 @@ from .models import (
     PPEIssuanceLine,
     PrimaryDocument,
     ProcurementRequest,
+    SiteMaterialRequest,
     SMRContract,
     StockIssue,
     StockMovement,
@@ -32,18 +36,22 @@ from .models import (
     SupplyContract,
     User,
     Worker,
+    WorkAcceptanceAct,
     WorkLog,
     WriteOffAct,
 )
 from .reporting import report_ppe_scoped
 from .services import (
     create_backup_payload,
+    create_ppe_issuance,
     create_work_log,
     create_primary_document,
     create_procurement_request,
+    create_site_material_request,
     create_stock_issue,
     create_stock_receipt,
     create_supplier_document,
+    create_work_acceptance,
     create_writeoff,
     load_operation_draft,
     restore_backup_payload,
@@ -51,6 +59,26 @@ from .services import (
     transition_document,
     workflow_allowed_statuses,
 )
+
+
+def material_items(
+    *,
+    code: str = "MAT-001",
+    quantity: str = "1",
+    unit_price: str = "100",
+    notes: str = "",
+) -> str:
+    return json.dumps(
+        [
+            {
+                "material_code": code,
+                "quantity": quantity,
+                "unit_price": unit_price,
+                "notes": notes,
+            }
+        ],
+        ensure_ascii=False,
+    )
 
 
 class WorkflowTests(TestCase):
@@ -92,7 +120,7 @@ class WorkflowTests(TestCase):
                 "supplier": self.supplier,
                 "status": DocumentStatus.DRAFT,
                 "notes": "Тестовая заявка",
-                "items": "MAT-001|10|100|Для монтажа",
+                "items": material_items(quantity="10", unit_price="100", notes="Для монтажа"),
             },
         )
         self.assertTrue(DocumentRecord.objects.filter(entity_type="procurement_request", entity_id=request.id).exists())
@@ -109,7 +137,7 @@ class WorkflowTests(TestCase):
                     "supplier": self.supplier,
                     "status": DocumentStatus.ACCEPTED,
                     "notes": "Некорректный старт",
-                    "items": "MAT-001|10|100|Для монтажа",
+                    "items": material_items(quantity="10", unit_price="100", notes="Для монтажа"),
                 },
             )
 
@@ -123,7 +151,7 @@ class WorkflowTests(TestCase):
                 "supplier": self.supplier,
                 "status": DocumentStatus.DRAFT,
                 "notes": "",
-                "items": "MAT-001|3|100|route",
+                "items": material_items(quantity="3", unit_price="100", notes="route"),
             },
         )
         record = DocumentRecord.objects.get(entity_type="procurement_request", entity_id=request.id)
@@ -132,6 +160,53 @@ class WorkflowTests(TestCase):
         self.assertIn("workflow_sent_accounting_by", record.metadata_json)
         self.assertIn("workflow_view_only", record.metadata_json)
         self.assertIn("workflow_route", record.metadata_json)
+
+    def test_smr_contract_export_uses_docx_template(self) -> None:
+        if not settings.DOCUMENT_TEMPLATES_DIR.exists():
+            self.skipTest("Document templates directory is not available.")
+
+        path = Exporter().export_document("smr_contract", self.contract.id)
+
+        with ZipFile(path) as archive:
+            document_xml = archive.read("word/document.xml").decode("utf-8")
+        self.assertIn(self.contract.number, document_xml)
+        self.assertIn("Заказчик", document_xml)
+        self.assertNotIn("{{", document_xml)
+
+    def test_site_material_report_export_uses_xlsx_template(self) -> None:
+        if not settings.DOCUMENT_TEMPLATES_DIR.exists():
+            self.skipTest("Document templates directory is not available.")
+
+        StockMovement.objects.create(
+            movement_date=timezone.localdate(),
+            material=self.material,
+            quantity_delta=Decimal("7"),
+            location_name=self.user.site_name,
+            source_type="seed",
+            source_id=7,
+            unit_price=Decimal("100"),
+            created_by=self.user,
+        )
+
+        path = Exporter().export_report(
+            "site_material_report",
+            {
+                "date_from": timezone.localdate().replace(day=1),
+                "date_to": timezone.localdate(),
+                "location_name": self.user.site_name,
+            },
+            user=self.user,
+        )
+
+        with ZipFile(path) as archive:
+            workbook_xml = "\n".join(
+                archive.read(name).decode("utf-8")
+                for name in archive.namelist()
+                if name.endswith(".xml")
+            )
+        self.assertIn(self.user.site_name, workbook_xml)
+        self.assertIn(self.material.code, workbook_xml)
+        self.assertNotIn("{{", workbook_xml)
 
     def test_supply_contract_workflow_entry_is_limited_to_director_or_admin(self) -> None:
         supply_contract = SupplyContract.objects.create(
@@ -159,7 +234,7 @@ class WorkflowTests(TestCase):
                 "supplier_document": None,
                 "status": DocumentStatus.DRAFT,
                 "notes": "",
-                "items": "MAT-001|20|100|Приход",
+                "items": material_items(quantity="20", unit_price="100", notes="Приход"),
             },
         )
         create_stock_issue(
@@ -171,12 +246,51 @@ class WorkflowTests(TestCase):
                 "received_by_name": "Прораб",
                 "status": DocumentStatus.DRAFT,
                 "notes": "",
-                "items": "MAT-001|8|100|Отпуск",
+                "items": material_items(quantity="8", unit_price="100", notes="Отпуск"),
             },
         )
         warehouse_balance = StockMovement.objects.filter(material=self.material, location_name=settings.WAREHOUSE_NAME).aggregate(total=Sum("quantity_delta"))["total"]
         self.assertEqual(receipt.lines.count(), 1)
         self.assertEqual(warehouse_balance, Decimal("12"))
+
+    def test_site_material_request_can_drive_stock_issue(self) -> None:
+        StockMovement.objects.create(
+            movement_date=timezone.localdate(),
+            material=self.material,
+            quantity_delta=Decimal("20"),
+            location_name=settings.WAREHOUSE_NAME,
+            source_type="seed",
+            source_id=3,
+            unit_price=Decimal("100"),
+            created_by=self.warehouse,
+        )
+        site_request = create_site_material_request(
+            user=self.user,
+            cleaned_data={
+                "request_date": timezone.localdate(),
+                "site_name": self.user.site_name,
+                "contract": self.contract,
+                "status": DocumentStatus.DRAFT,
+                "notes": "Нужно со склада",
+                "items": material_items(quantity="6", unit_price="100", notes="по заявке участка"),
+            },
+        )
+        issue = create_stock_issue(
+            user=self.warehouse,
+            cleaned_data={
+                "issue_date": timezone.localdate(),
+                "site_name": self.user.site_name,
+                "site_request": site_request,
+                "contract": None,
+                "stock_receipt": None,
+                "received_by_name": "Прораб",
+                "status": DocumentStatus.DRAFT,
+                "notes": "",
+                "items": "",
+            },
+        )
+        self.assertEqual(issue.site_request, site_request)
+        self.assertEqual(issue.lines.first().quantity, Decimal("6.000"))
 
     def test_stock_issue_rejects_negative_warehouse_balance(self) -> None:
         with self.assertRaisesMessage(ValueError, "Недостаточно остатка"):
@@ -189,7 +303,7 @@ class WorkflowTests(TestCase):
                     "received_by_name": "Прораб",
                     "status": DocumentStatus.DRAFT,
                     "notes": "",
-                    "items": "MAT-001|2|100|Отпуск",
+                    "items": material_items(quantity="2", unit_price="100", notes="Отпуск"),
                 },
             )
 
@@ -219,6 +333,36 @@ class WorkflowTests(TestCase):
         )
         self.assertEqual(act.lines.count(), 1)
         self.assertEqual(act.lines.first().actual_quantity, Decimal("7.500"))
+
+    def test_writeoff_can_take_work_type_and_volume_from_contract(self) -> None:
+        StockMovement.objects.create(
+            movement_date=timezone.localdate(),
+            material=self.material,
+            quantity_delta=Decimal("20"),
+            location_name="Участок 12",
+            source_type="seed",
+            source_id=4,
+            unit_price=Decimal("100"),
+            created_by=self.user,
+        )
+        self.contract.planned_volume = Decimal("2")
+        self.contract.volume_unit = "этап"
+        self.contract.save(update_fields=["planned_volume", "volume_unit", "updated_at"])
+        act = create_writeoff(
+            user=self.user,
+            cleaned_data={
+                "act_date": timezone.localdate(),
+                "contract": self.contract,
+                "site_name": "Участок 12",
+                "work_type": "",
+                "work_volume": None,
+                "volume_unit": "",
+                "status": DocumentStatus.DRAFT,
+                "notes": "",
+            },
+        )
+        self.assertEqual(act.work_type, self.contract.work_type)
+        self.assertEqual(act.work_volume, Decimal("2"))
 
     def test_writeoff_rejects_negative_site_balance(self) -> None:
         StockMovement.objects.create(
@@ -256,7 +400,7 @@ class WorkflowTests(TestCase):
                 "supplier": self.supplier,
                 "status": DocumentStatus.APPROVAL,
                 "notes": "На согласовании",
-                "items": "MAT-001|10|100|Для монтажа",
+                "items": material_items(quantity="10", unit_price="100", notes="Для монтажа"),
             },
         )
         record = DocumentRecord.objects.get(entity_type="procurement_request", entity_id=request.id)
@@ -275,6 +419,28 @@ class WorkflowTests(TestCase):
         self.assertEqual(request.status, DocumentStatus.ACCEPTED)
         self.assertEqual(AuditLog.objects.filter(entity_type="procurement_request", action="status_change").count(), 3)
 
+    def test_work_acceptance_closes_smr_contract_after_accounting_acceptance(self) -> None:
+        act = create_work_acceptance(
+            user=self.user,
+            cleaned_data={
+                "act_date": timezone.localdate(),
+                "contract": self.contract,
+                "site_name": self.user.site_name,
+                "work_description": "Работы выполнены",
+                "accepted_volume": Decimal("1"),
+                "volume_unit": "этап",
+                "amount": Decimal("1000"),
+                "status": DocumentStatus.APPROVAL,
+                "notes": "",
+            },
+        )
+        record = DocumentRecord.objects.get(entity_type="work_acceptance", entity_id=act.id)
+        transition_document(user=self.director, record=record, new_status=DocumentStatus.APPROVED)
+        record.refresh_from_db()
+        transition_document(user=self.accounting, record=record, new_status=DocumentStatus.ACCEPTED)
+        self.contract.refresh_from_db()
+        self.assertEqual(self.contract.status, DocumentStatus.ACCEPTED)
+
     def test_primary_document_is_generated_from_request_and_synced_to_archive(self) -> None:
         request = create_procurement_request(
             user=self.user,
@@ -285,7 +451,7 @@ class WorkflowTests(TestCase):
                 "supplier": self.supplier,
                 "status": DocumentStatus.DRAFT,
                 "notes": "Основание для счета",
-                "items": "MAT-001|10|125|Первичный документ",
+                "items": material_items(quantity="10", unit_price="125", notes="Первичный документ"),
             },
         )
         document = create_primary_document(
@@ -309,6 +475,89 @@ class WorkflowTests(TestCase):
         self.assertEqual(document.amount, Decimal("1250"))
         self.assertEqual(record.doc_number, document.number)
         self.assertEqual(record.counterparty, self.supplier.name)
+
+    def test_stock_receipt_can_use_primary_document_lines(self) -> None:
+        request = create_procurement_request(
+            user=self.user,
+            cleaned_data={
+                "request_date": timezone.localdate(),
+                "site_name": self.user.site_name,
+                "contract": self.contract,
+                "supplier": self.supplier,
+                "status": DocumentStatus.DRAFT,
+                "notes": "",
+                "items": material_items(quantity="4", unit_price="125", notes="накладная"),
+            },
+        )
+        goods_waybill, _created = DocumentType.objects.get_or_create(
+            code="goods_waybill",
+            defaults={
+                "name": "Товарная накладная",
+                "prefix": "TN",
+                "available_for_generation": True,
+                "requires_items": True,
+            },
+        )
+        primary = create_primary_document(
+            user=self.director,
+            cleaned_data={
+                "document_type": goods_waybill,
+                "doc_date": timezone.localdate(),
+                "supplier": self.supplier,
+                "request": request,
+                "supply_contract": None,
+                "stock_receipt": None,
+                "status": DocumentStatus.DRAFT,
+                "amount": Decimal("0"),
+                "vat_amount": Decimal("0"),
+                "notes": "",
+                "items": "",
+            },
+        )
+        receipt = create_stock_receipt(
+            user=self.warehouse,
+            cleaned_data={
+                "receipt_date": timezone.localdate(),
+                "supplier": None,
+                "supplier_document": None,
+                "primary_document": primary,
+                "status": DocumentStatus.DRAFT,
+                "notes": "",
+                "items": "",
+            },
+        )
+        self.assertEqual(receipt.primary_document, primary)
+        self.assertEqual(receipt.lines.first().quantity, Decimal("4.000"))
+
+    def test_ppe_issuance_accepts_worker_and_material_names_with_sizes(self) -> None:
+        worker = Worker.objects.create(full_name="Иван Иванов", employee_number="EMP-777", site_name=self.user.site_name)
+        ppe = Material.objects.create(code="PPE-777", name="Костюм летний", unit="шт", price=500, min_stock=0, is_ppe=True)
+        StockMovement.objects.create(
+            movement_date=timezone.localdate(),
+            material=ppe,
+            quantity_delta=Decimal("3"),
+            location_name=settings.WAREHOUSE_NAME,
+            source_type="seed",
+            source_id=5,
+            unit_price=Decimal("500"),
+            created_by=self.warehouse,
+        )
+        issuance = create_ppe_issuance(
+            user=self.user,
+            cleaned_data={
+                "issue_date": timezone.localdate(),
+                "site_name": self.user.site_name,
+                "season": "летняя",
+                "status": DocumentStatus.DRAFT,
+                "notes": "",
+                "items": '[{"worker_name":"Иван Иванов","material_name":"Костюм летний","quantity":"1","service_life_months":"12","clothing_size":"52","shoe_size":"42"}]',
+            },
+        )
+        line = issuance.lines.get()
+        self.assertEqual(line.worker, worker)
+        self.assertEqual(line.material, ppe)
+        self.assertEqual(line.clothing_size, "52")
+        self.assertEqual(line.shoe_size, "42")
 
     def test_supplier_cannot_upload_document_for_another_supplier(self) -> None:
         supplier_user = User.objects.create_user(username="supplier-guard", password="supplier123", role="supplier", supplier=self.supplier)
@@ -334,7 +583,7 @@ class WorkflowTests(TestCase):
         save_operation_draft(
             user=self.user,
             operation_slug="procurement",
-            payload={"site_name": "Участок 12", "notes": "Черновик заявки", "items": "MAT-001|3|100|Автосохранение"},
+            payload={"site_name": "Участок 12", "notes": "Черновик заявки", "items": material_items(quantity="3", unit_price="100", notes="Автосохранение")},
         )
         payload = load_operation_draft(user=self.user, operation_slug="procurement")
         self.assertEqual(payload["site_name"], "Участок 12")
@@ -492,7 +741,7 @@ class ViewSmokeTests(TestCase):
                 "supplier": self.supplier,
                 "status": DocumentStatus.DRAFT,
                 "notes": "",
-                "items": "MAT-001|3|100|own",
+                "items": material_items(quantity="3", unit_price="100", notes="own"),
             },
         )
         foreign_request = create_procurement_request(
@@ -504,7 +753,7 @@ class ViewSmokeTests(TestCase):
                 "supplier": self.other_supplier,
                 "status": DocumentStatus.DRAFT,
                 "notes": "",
-                "items": "MAT-001|4|100|foreign",
+                "items": material_items(quantity="4", unit_price="100", notes="foreign"),
             },
         )
 
@@ -523,12 +772,12 @@ class ViewSmokeTests(TestCase):
                 "supplier": self.supplier.id,
                 "status": DocumentStatus.DRAFT,
                 "notes": "",
-                "items": "MAT-001|1|100|new",
+                "items": material_items(quantity="1", unit_price="100", notes="new"),
             },
         )
         self.assertEqual(post_response.status_code, 403)
 
-    def test_supplier_archive_shows_only_own_docs_and_allows_supply_confirmation(self) -> None:
+    def test_supplier_documents_section_shows_only_own_docs_and_allows_supply_confirmation(self) -> None:
         own_request = create_procurement_request(
             user=self.site_manager,
             cleaned_data={
@@ -538,7 +787,7 @@ class ViewSmokeTests(TestCase):
                 "supplier": self.supplier,
                 "status": DocumentStatus.DRAFT,
                 "notes": "",
-                "items": "MAT-001|5|100|own",
+                "items": material_items(quantity="5", unit_price="100", notes="own"),
             },
         )
         own_doc = create_supplier_document(
@@ -573,7 +822,7 @@ class ViewSmokeTests(TestCase):
         )
 
         self.client.login(username="supplier", password="supplier123")
-        response = self.client.get(reverse("archive"))
+        response = self.client.get(reverse("documents"))
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, own_doc.doc_number)
         self.assertNotContains(response, "SUP-FOREIGN-001")
@@ -584,7 +833,7 @@ class ViewSmokeTests(TestCase):
         self.assertNotIn(DocumentStatus.APPROVAL, available_statuses)
 
         post_response = self.client.post(
-            reverse("archive"),
+            reverse("documents"),
             {"record_id": record.id, "new_status": DocumentStatus.SUPPLY_CONFIRMED},
         )
         self.assertEqual(post_response.status_code, 302)
@@ -626,7 +875,7 @@ class ViewSmokeTests(TestCase):
                 "supplier": self.supplier,
                 "status": DocumentStatus.DRAFT,
                 "notes": "",
-                "items": "MAT-001|5|100|Тест",
+                "items": material_items(quantity="5", unit_price="100", notes="Тест"),
             },
         )
         create_supplier_document(
@@ -677,7 +926,7 @@ class ViewSmokeTests(TestCase):
                 "supplier": self.supplier,
                 "status": DocumentStatus.DRAFT,
                 "notes": "",
-                "items": "MAT-001|5|100|Тест",
+                "items": material_items(quantity="5", unit_price="100", notes="Тест"),
             },
         )
         create_primary_document(
@@ -709,7 +958,7 @@ class ViewSmokeTests(TestCase):
                 "amount": Decimal("700"),
                 "vat_amount": Decimal("140"),
                 "notes": "",
-                "items": "MAT-001|7|100|Чужой",
+                "items": material_items(quantity="7", unit_price="100", notes="Чужой"),
             },
         )
 
@@ -720,20 +969,20 @@ class ViewSmokeTests(TestCase):
         self.assertEqual(len(payload), 1)
         self.assertEqual(payload[0]["supplier_name"], self.supplier.name)
 
-    def test_operation_draft_endpoint_saves_procurement_draft(self) -> None:
+    def test_operation_draft_endpoint_saves_site_request_draft(self) -> None:
         self.client.login(username="site", password="site123")
         response = self.client.post(
-            reverse("operation-draft", kwargs={"slug": "procurement"}),
+            reverse("operation-draft", kwargs={"slug": "site-requests"}),
             {
                 "request_date": timezone.localdate().isoformat(),
                 "site_name": "Участок 12",
                 "status": DocumentStatus.DRAFT,
                 "notes": "Автосохранение из UI",
-                "items": "MAT-001|2|100|Черновик",
+                "items": material_items(quantity="2", unit_price="100", notes="Черновик"),
             },
         )
         self.assertEqual(response.status_code, 200)
-        payload = load_operation_draft(user=self.site_manager, operation_slug="procurement")
+        payload = load_operation_draft(user=self.site_manager, operation_slug="site-requests")
         self.assertEqual(payload["site_name"], "Участок 12")
         self.assertIn("Черновик", payload["items"])
 
@@ -744,6 +993,7 @@ class ViewSmokeTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context["catalog_links"], [])
         self.assertEqual(response.context["operation_links"], [])
+        self.assertTrue(response.context["can_access_documents"])
         self.assertTrue(response.context["can_access_archive"])
         self.assertTrue(response.context["can_access_reports"])
         self.assertFalse(response.context["can_access_backups"])
@@ -833,7 +1083,7 @@ class ViewSmokeTests(TestCase):
         self.assertContains(report_response, self.site_manager.site_name)
         self.assertNotContains(report_response, self.other_site_manager.site_name)
 
-    def test_accounting_archive_and_documents_api_show_only_approved_records(self) -> None:
+    def test_accounting_documents_section_accepts_records_and_archive_shows_closed_only(self) -> None:
         draft_request = create_procurement_request(
             user=self.site_manager,
             cleaned_data={
@@ -843,7 +1093,7 @@ class ViewSmokeTests(TestCase):
                 "supplier": self.supplier,
                 "status": DocumentStatus.DRAFT,
                 "notes": "",
-                "items": "MAT-001|1|100|draft",
+                "items": material_items(quantity="1", unit_price="100", notes="draft"),
             },
         )
         approved_request = create_procurement_request(
@@ -855,16 +1105,16 @@ class ViewSmokeTests(TestCase):
                 "supplier": self.supplier,
                 "status": DocumentStatus.APPROVAL,
                 "notes": "",
-                "items": "MAT-001|2|100|approved",
+                "items": material_items(quantity="2", unit_price="100", notes="approved"),
             },
         )
         approved_record = DocumentRecord.objects.get(entity_type="procurement_request", entity_id=approved_request.id)
         transition_document(user=self.director, record=approved_record, new_status=DocumentStatus.APPROVED)
 
         self.client.login(username="accounting", password="accounting123")
-        archive_response = self.client.get(reverse("archive"))
-        self.assertEqual(archive_response.status_code, 200)
-        records = archive_response.context["records"]
+        documents_response = self.client.get(reverse("documents"))
+        self.assertEqual(documents_response.status_code, 200)
+        records = documents_response.context["records"]
         self.assertEqual([record.entity_id for record in records], [approved_request.id])
         self.assertTrue(records[0].can_update_status)
         available_statuses = [value for value, _label in records[0].available_status_choices]
@@ -872,12 +1122,18 @@ class ViewSmokeTests(TestCase):
         self.assertIn(DocumentStatus.REWORK, available_statuses)
 
         post_response = self.client.post(
-            reverse("archive"),
+            reverse("documents"),
             {"record_id": approved_record.id, "new_status": DocumentStatus.ACCEPTED},
         )
         self.assertEqual(post_response.status_code, 302)
         approved_request.refresh_from_db()
         self.assertEqual(approved_request.status, DocumentStatus.ACCEPTED)
+
+        archive_response = self.client.get(reverse("archive"))
+        self.assertEqual(archive_response.status_code, 200)
+        archive_records = archive_response.context["records"]
+        self.assertEqual([record.entity_id for record in archive_records], [approved_request.id])
+        self.assertFalse(archive_records[0].can_update_status)
 
         api_response = self.client.get("/api/documents/")
         self.assertEqual(api_response.status_code, 200)

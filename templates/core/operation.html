@@ -60,12 +60,6 @@
                         </div>
                     {% endif %}
                 {% endfor %}
-                {% if sample_lines and not has_items_field %}
-                    <div class="hint-box">
-                        <strong>Пример строк:</strong>
-                        <pre>{{ sample_lines }}</pre>
-                    </div>
-                {% endif %}
                 <button type="submit" class="primary-button">Создать</button>
             </form>
         {% else %}
@@ -84,17 +78,27 @@
                         {% for header in headers %}
                             <th>{{ header }}</th>
                         {% endfor %}
+                        {% if operation_has_export_actions %}
+                            <th>Word</th>
+                        {% endif %}
                     </tr>
                 </thead>
                 <tbody>
                     {% for row in rows %}
                         <tr>
-                            {% for cell in row %}
+                            {% for cell in row.cells %}
                                 <td>{{ cell }}</td>
                             {% endfor %}
+                            {% if operation_has_export_actions %}
+                                <td>
+                                    {% if row.export_url %}
+                                        <a class="ghost-button" href="{{ row.export_url }}">Экспорт</a>
+                                    {% endif %}
+                                </td>
+                            {% endif %}
                         </tr>
                     {% empty %}
-                        <tr><td colspan="{{ headers|length }}">Документов пока нет.</td></tr>
+                        <tr><td colspan="{% if operation_has_export_actions %}{{ headers|length|add:'1' }}{% else %}{{ headers|length }}{% endif %}">Документов пока нет.</td></tr>
                     {% endfor %}
                 </tbody>
             </table>
@@ -165,7 +169,9 @@
 
     const normalizeCode = (value) => String(value || "").trim().toUpperCase();
     const materialIndex = new Map(materialCatalog.map((item) => [normalizeCode(item.code), item]));
+    const materialNameIndex = new Map(materialCatalog.map((item) => [String(item.name || "").trim().toLowerCase(), item]));
     const workerIndex = new Map(workerCatalog.map((item) => [String(item.employee_number || "").trim(), item]));
+    const workerNameIndex = new Map(workerCatalog.map((item) => [String(item.full_name || "").trim().toLowerCase(), item]));
 
     const ensureDatalist = (id, values, formatter) => {
         if (!values.length || document.getElementById(id)) return;
@@ -185,50 +191,33 @@
         label: `${item.code || ""} ${item.name || ""}`.trim(),
     }));
 
+    ensureDatalist("material-name-options", materialCatalog, (item) => ({
+        value: String(item.name || ""),
+        label: `${item.code || ""} ${item.name || ""}`.trim(),
+    }));
+
     ensureDatalist("worker-number-options", workerCatalog, (item) => ({
         value: String(item.employee_number || ""),
         label: `${item.employee_number || ""} ${item.full_name || ""}`.trim(),
     }));
 
-    const parseLegacyRows = (rawValue, mode) => {
-        const rows = [];
-        rawValue.split(/\r?\n/).forEach((rawLine) => {
-            const line = rawLine.trim();
-            if (!line) return;
-            const parts = line.split("|").map((item) => item.trim());
-            if (mode === "ppe-lines") {
-                rows.push({
-                    employee_number: parts[0] || "",
-                    material_code: parts[1] || "",
-                    quantity: parts[2] || "",
-                    service_life_months: parts[3] || "",
-                });
-            } else {
-                rows.push({
-                    material_code: parts[0] || "",
-                    quantity: parts[1] || "",
-                    unit_price: parts[2] || "",
-                    notes: parts[3] || "",
-                });
-            }
-        });
-        return rows;
-    };
+    ensureDatalist("worker-name-options", workerCatalog, (item) => ({
+        value: String(item.full_name || ""),
+        label: `${item.employee_number || ""} ${item.full_name || ""}`.trim(),
+    }));
 
-    const parseStoredRows = (rawValue, mode) => {
+    const parseStoredRows = (rawValue) => {
         const payload = String(rawValue || "").trim();
         if (!payload) return [];
-        if (payload.startsWith("[")) {
-            try {
-                const parsed = JSON.parse(payload);
-                if (Array.isArray(parsed)) {
-                    return parsed;
-                }
-            } catch (_error) {
-                // fallback to legacy format
+        try {
+            const parsed = JSON.parse(payload);
+            if (Array.isArray(parsed)) {
+                return parsed;
             }
+        } catch (_error) {
+            return [];
         }
-        return parseLegacyRows(payload, mode);
+        return [];
     };
 
     const stringifyRows = (rows, mode) => {
@@ -236,9 +225,13 @@
             if (mode === "ppe-lines") {
                 return {
                     employee_number: String(row.employee_number || "").trim(),
+                    worker_name: String(row.worker_name || "").trim(),
                     material_code: String(row.material_code || "").trim(),
+                    material_name: String(row.material_name || "").trim(),
                     quantity: String(row.quantity || "").trim(),
                     service_life_months: String(row.service_life_months || "").trim(),
+                    clothing_size: String(row.clothing_size || "").trim(),
+                    shoe_size: String(row.shoe_size || "").trim(),
                 };
             }
             return {
@@ -265,7 +258,7 @@
         const addButton = itemsGrid.querySelector("[data-items-add]");
         const clearButton = itemsGrid.querySelector("[data-items-clear]");
 
-        const storedRows = parseStoredRows(itemsHiddenInput.value, mode);
+        const storedRows = parseStoredRows(itemsHiddenInput.value);
 
         const readOnlyCell = (value = "") => {
             const input = document.createElement("input");
@@ -289,7 +282,7 @@
 
         const buildHeader = () => {
             const headers = mode === "ppe-lines"
-                ? ["Таб. номер", "Сотрудник", "Код", "Наименование", "Ед.", "Цена", "Кол-во", "Срок, мес", ""]
+                ? ["ФИО", "Таб. номер", "Наименование", "Код", "Размер одежды", "Размер обуви", "Кол-во", "Срок, мес", ""]
                 : ["Код", "Наименование", "Ед.", "Кол-во", "Цена", "Примечание", ""];
             const row = document.createElement("tr");
             headers.forEach((title) => {
@@ -306,9 +299,13 @@
                 if (mode === "ppe-lines") {
                     return {
                         employee_number: row.querySelector('input[data-col="employee_number"]')?.value || "",
+                        worker_name: row.querySelector('input[data-col="worker_name"]')?.value || "",
                         material_code: row.querySelector('input[data-col="material_code"]')?.value || "",
+                        material_name: row.querySelector('input[data-col="material_name"]')?.value || "",
                         quantity: row.querySelector('input[data-col="quantity"]')?.value || "",
                         service_life_months: row.querySelector('input[data-col="service_life_months"]')?.value || "",
+                        clothing_size: row.querySelector('input[data-col="clothing_size"]')?.value || "",
+                        shoe_size: row.querySelector('input[data-col="shoe_size"]')?.value || "",
                     };
                 }
                 return {
@@ -397,35 +394,43 @@
 
         const createPpeRow = (seed = {}) => {
             const row = document.createElement("tr");
-            const employeeInput = editableCell({ value: seed.employee_number || "", list: "worker-number-options", col: "employee_number" });
-            const employeeNameInput = readOnlyCell();
-            const codeInput = editableCell({ value: seed.material_code || "", list: "material-code-options", col: "material_code" });
-            const nameInput = readOnlyCell();
-            const unitInput = readOnlyCell();
-            const priceInput = readOnlyCell();
+            const employeeNameInput = editableCell({ value: seed.worker_name || "", list: "worker-name-options", col: "worker_name" });
+            const employeeInput = readOnlyCell(seed.employee_number || "");
+            employeeInput.dataset.col = "employee_number";
+            const nameInput = editableCell({ value: seed.material_name || "", list: "material-name-options", col: "material_name" });
+            const codeInput = readOnlyCell(seed.material_code || "");
+            codeInput.dataset.col = "material_code";
+            const clothingSizeInput = editableCell({ value: seed.clothing_size || "", col: "clothing_size" });
+            const shoeSizeInput = editableCell({ value: seed.shoe_size || "", col: "shoe_size" });
             const quantityInput = editableCell({ type: "number", value: seed.quantity || "", step: "0.001", min: "0", col: "quantity" });
             const serviceLifeInput = editableCell({ type: "number", value: seed.service_life_months || "", step: "1", min: "1", col: "service_life_months" });
 
             const fillWorker = () => {
-                const worker = workerIndex.get(String(employeeInput.value || "").trim());
-                employeeNameInput.value = worker?.full_name || "";
+                const typedName = String(employeeNameInput.value || "").trim().toLowerCase();
+                const worker = workerNameIndex.get(typedName) || workerIndex.get(String(employeeInput.value || "").trim());
+                employeeNameInput.value = worker?.full_name || employeeNameInput.value;
+                employeeInput.value = worker?.employee_number || employeeInput.value;
             };
 
             const fillMaterial = () => {
-                const material = materialIndex.get(normalizeCode(codeInput.value));
-                nameInput.value = material?.name || "";
-                unitInput.value = material?.unit || "";
-                priceInput.value = material?.price || "";
+                const typedName = String(nameInput.value || "").trim().toLowerCase();
+                const material = materialNameIndex.get(typedName) || materialIndex.get(normalizeCode(codeInput.value));
+                nameInput.value = material?.name || nameInput.value;
+                codeInput.value = material?.code || codeInput.value;
             };
 
             fillWorker();
             fillMaterial();
             employeeInput.addEventListener("change", fillWorker);
             employeeInput.addEventListener("blur", fillWorker);
+            employeeNameInput.addEventListener("change", fillWorker);
+            employeeNameInput.addEventListener("blur", fillWorker);
             codeInput.addEventListener("change", fillMaterial);
             codeInput.addEventListener("blur", fillMaterial);
+            nameInput.addEventListener("change", fillMaterial);
+            nameInput.addEventListener("blur", fillMaterial);
 
-            [employeeInput, employeeNameInput, codeInput, nameInput, unitInput, priceInput, quantityInput, serviceLifeInput].forEach((input) => {
+            [employeeNameInput, employeeInput, nameInput, codeInput, clothingSizeInput, shoeSizeInput, quantityInput, serviceLifeInput].forEach((input) => {
                 const cell = document.createElement("td");
                 cell.appendChild(input);
                 row.appendChild(cell);

@@ -8,19 +8,21 @@ from rest_framework.views import APIView
 from rest_framework.viewsets import ReadOnlyModelViewSet
 
 from .access import ROLE_SET_INTERNAL, ROLE_SET_SUPPLIER_PORTAL
-from .models import DocumentRecord, PPEIssuance, PrimaryDocument, ProcurementRequest, RoleChoices, StockIssue, StockReceipt, SupplierDocument, SupplyContract, WorkLog, WriteOffAct
+from .models import DocumentRecord, PPEIssuance, PrimaryDocument, ProcurementRequest, RoleChoices, SiteMaterialRequest, StockIssue, StockReceipt, SupplierDocument, SupplyContract, WorkAcceptanceAct, WorkLog, WriteOffAct
 from .serializers import (
     DocumentRecordSerializer,
     MetricSerializer,
     PPEIssuanceSerializer,
     PrimaryDocumentSerializer,
     ProcurementRequestSerializer,
+    SiteMaterialRequestSerializer,
     SiteBalanceSerializer,
     StockIssueSerializer,
     StockReceiptSerializer,
     SupplyContractSerializer,
     SupplierDocumentSerializer,
     WarehouseBalanceSerializer,
+    WorkAcceptanceSerializer,
     WorkLogSerializer,
     WriteOffSerializer,
 )
@@ -74,9 +76,15 @@ class DocumentRecordViewSet(RoleScopedReadOnlyViewSet):
 
 
 class ProcurementRequestViewSet(RoleScopedReadOnlyViewSet):
-    queryset = ProcurementRequest.objects.select_related("supplier", "contract", "requested_by").prefetch_related("lines__material").order_by("-request_date", "-id")
+    queryset = ProcurementRequest.objects.select_related("supplier", "contract", "site_request", "requested_by").prefetch_related("lines__material").order_by("-request_date", "-id")
     serializer_class = ProcurementRequestSerializer
     allowed_roles = {RoleChoices.ADMIN, RoleChoices.PROCUREMENT, RoleChoices.SITE_MANAGER, RoleChoices.SUPPLIER}
+
+
+class SiteMaterialRequestViewSet(RoleScopedReadOnlyViewSet):
+    queryset = SiteMaterialRequest.objects.select_related("contract", "requested_by").prefetch_related("lines__material").order_by("-request_date", "-id")
+    serializer_class = SiteMaterialRequestSerializer
+    allowed_roles = {RoleChoices.ADMIN, RoleChoices.PROCUREMENT, RoleChoices.WAREHOUSE, RoleChoices.SITE_MANAGER}
 
 
 class SupplyContractViewSet(RoleScopedReadOnlyViewSet):
@@ -98,19 +106,19 @@ class PrimaryDocumentViewSet(RoleScopedReadOnlyViewSet):
         .order_by("-doc_date", "-id")
     )
     serializer_class = PrimaryDocumentSerializer
-    allowed_roles = {RoleChoices.ADMIN, RoleChoices.PROCUREMENT, RoleChoices.WAREHOUSE, RoleChoices.SITE_MANAGER, RoleChoices.SUPPLIER}
+    allowed_roles = {RoleChoices.ADMIN, RoleChoices.PROCUREMENT, RoleChoices.SUPPLIER}
 
 
 class StockReceiptViewSet(RoleScopedReadOnlyViewSet):
-    queryset = StockReceipt.objects.select_related("supplier", "supplier_document").prefetch_related("lines__material").order_by("-receipt_date", "-id")
+    queryset = StockReceipt.objects.select_related("supplier", "supplier_document", "primary_document").prefetch_related("lines__material").order_by("-receipt_date", "-id")
     serializer_class = StockReceiptSerializer
-    allowed_roles = {RoleChoices.ADMIN, RoleChoices.PROCUREMENT, RoleChoices.WAREHOUSE}
+    allowed_roles = {RoleChoices.ADMIN, RoleChoices.WAREHOUSE}
 
 
 class StockIssueViewSet(RoleScopedReadOnlyViewSet):
-    queryset = StockIssue.objects.select_related("contract").prefetch_related("lines__material").order_by("-issue_date", "-id")
+    queryset = StockIssue.objects.select_related("contract", "site_request", "stock_receipt").prefetch_related("lines__material").order_by("-issue_date", "-id")
     serializer_class = StockIssueSerializer
-    allowed_roles = {RoleChoices.ADMIN, RoleChoices.PROCUREMENT, RoleChoices.WAREHOUSE, RoleChoices.SITE_MANAGER}
+    allowed_roles = {RoleChoices.ADMIN, RoleChoices.WAREHOUSE, RoleChoices.SITE_MANAGER}
 
 
 class WriteOffViewSet(RoleScopedReadOnlyViewSet):
@@ -122,7 +130,13 @@ class WriteOffViewSet(RoleScopedReadOnlyViewSet):
 class PPEIssuanceViewSet(RoleScopedReadOnlyViewSet):
     queryset = PPEIssuance.objects.prefetch_related("lines__worker", "lines__material").order_by("-issue_date", "-id")
     serializer_class = PPEIssuanceSerializer
-    allowed_roles = {RoleChoices.ADMIN, RoleChoices.WAREHOUSE, RoleChoices.SITE_MANAGER}
+    allowed_roles = {RoleChoices.ADMIN, RoleChoices.SITE_MANAGER}
+
+
+class WorkAcceptanceViewSet(RoleScopedReadOnlyViewSet):
+    queryset = WorkAcceptanceAct.objects.select_related("contract", "contract__object").order_by("-act_date", "-id")
+    serializer_class = WorkAcceptanceSerializer
+    allowed_roles = {RoleChoices.ADMIN, RoleChoices.DIRECTOR, RoleChoices.SITE_MANAGER}
 
 
 class WorkLogViewSet(RoleScopedReadOnlyViewSet):
@@ -167,6 +181,7 @@ class LowStockAlertsAPIView(RoleScopedAPIView):
 router = DefaultRouter()
 router.register("documents", DocumentRecordViewSet, basename="api-documents")
 router.register("procurement-requests", ProcurementRequestViewSet, basename="api-procurement-requests")
+router.register("site-material-requests", SiteMaterialRequestViewSet, basename="api-site-material-requests")
 router.register("supply-contracts", SupplyContractViewSet, basename="api-supply-contracts")
 router.register("supplier-documents", SupplierDocumentViewSet, basename="api-supplier-documents")
 router.register("primary-documents", PrimaryDocumentViewSet, basename="api-primary-documents")
@@ -174,4 +189,5 @@ router.register("stock-receipts", StockReceiptViewSet, basename="api-stock-recei
 router.register("stock-issues", StockIssueViewSet, basename="api-stock-issues")
 router.register("writeoffs", WriteOffViewSet, basename="api-writeoffs")
 router.register("ppe-issuances", PPEIssuanceViewSet, basename="api-ppe-issuances")
+router.register("work-acceptance", WorkAcceptanceViewSet, basename="api-work-acceptance")
 router.register("worklogs", WorkLogViewSet, basename="api-worklogs")

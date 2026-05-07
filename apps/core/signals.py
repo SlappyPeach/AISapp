@@ -11,11 +11,13 @@ from .models import (
     PPEIssuance,
     PrimaryDocument,
     ProcurementRequest,
+    SiteMaterialRequest,
     SMRContract,
     StockIssue,
     StockReceipt,
     SupplierDocument,
     SupplyContract,
+    WorkAcceptanceAct,
     WriteOffAct,
 )
 from .services import sync_document_record, workflow_route_metadata
@@ -94,6 +96,31 @@ def sync_procurement(sender, instance: ProcurementRequest, **kwargs) -> None:
             "procurement_request",
             {
                 "supplier_id": instance.supplier_id,
+                "site_name": instance.site_name,
+                "contract_id": instance.contract_id,
+                "site_request_id": instance.site_request_id,
+            },
+        ),
+        search_text=instance.notes,
+    )
+
+
+@receiver(post_save, sender=SiteMaterialRequest)
+def sync_site_material_request(sender, instance: SiteMaterialRequest, **kwargs) -> None:
+    sync_document_record(
+        entity_type="site_material_request",
+        entity_id=instance.id,
+        doc_type="Заявка кладовщику",
+        doc_number=instance.number,
+        doc_date=instance.request_date,
+        status=instance.status,
+        title="Заявка начальника участка на материалы",
+        counterparty="Кладовщик",
+        object_name=instance.contract.number if instance.contract else instance.site_name,
+        created_by=instance.requested_by,
+        metadata=_workflow_metadata(
+            "site_material_request",
+            {
                 "site_name": instance.site_name,
                 "contract_id": instance.contract_id,
             },
@@ -175,7 +202,12 @@ def sync_receipt(sender, instance: StockReceipt, **kwargs) -> None:
         created_by=instance.created_by,
         metadata=_workflow_metadata(
             "stock_receipt",
-            {"supplier_id": instance.supplier_id, "site_name": settings.WAREHOUSE_NAME, "supplier_document_id": instance.supplier_document_id},
+            {
+                "supplier_id": instance.supplier_id,
+                "site_name": settings.WAREHOUSE_NAME,
+                "supplier_document_id": instance.supplier_document_id,
+                "primary_document_id": instance.primary_document_id,
+            },
         ),
         search_text=instance.notes,
     )
@@ -194,8 +226,41 @@ def sync_issue(sender, instance: StockIssue, **kwargs) -> None:
         counterparty=instance.received_by_name,
         object_name=instance.contract.number if instance.contract else instance.site_name,
         created_by=instance.issued_by,
-        metadata=_workflow_metadata("stock_issue", {"site_name": instance.site_name, "contract_id": instance.contract_id}),
+        metadata=_workflow_metadata(
+            "stock_issue",
+            {
+                "site_name": instance.site_name,
+                "contract_id": instance.contract_id,
+                "site_request_id": instance.site_request_id,
+                "stock_receipt_id": instance.stock_receipt_id,
+            },
+        ),
         search_text=instance.notes,
+    )
+
+
+@receiver(post_save, sender=WorkAcceptanceAct)
+def sync_work_acceptance(sender, instance: WorkAcceptanceAct, **kwargs) -> None:
+    sync_document_record(
+        entity_type="work_acceptance",
+        entity_id=instance.id,
+        doc_type="Акт сдачи-приемки",
+        doc_number=instance.number,
+        doc_date=instance.act_date,
+        status=instance.status,
+        title="Акт сдачи-приемки выполненных работ",
+        counterparty=instance.contract.customer_name,
+        object_name=instance.contract.object.name if instance.contract.object else instance.site_name,
+        created_by=instance.created_by,
+        metadata=_workflow_metadata(
+            "work_acceptance",
+            {
+                "site_name": instance.site_name,
+                "contract_id": instance.contract_id,
+                "amount": str(instance.amount),
+            },
+        ),
+        search_text=f"{instance.work_description} {instance.notes}".strip(),
     )
 
 
@@ -257,6 +322,11 @@ def cleanup_procurement(sender, instance: ProcurementRequest, **kwargs) -> None:
     _cleanup_record("procurement_request", instance.id)
 
 
+@receiver(post_delete, sender=SiteMaterialRequest)
+def cleanup_site_material_request(sender, instance: SiteMaterialRequest, **kwargs) -> None:
+    _cleanup_record("site_material_request", instance.id)
+
+
 @receiver(post_delete, sender=PrimaryDocument)
 def cleanup_primary_document(sender, instance: PrimaryDocument, **kwargs) -> None:
     _cleanup_record("primary_document", instance.id)
@@ -275,6 +345,11 @@ def cleanup_receipt(sender, instance: StockReceipt, **kwargs) -> None:
 @receiver(post_delete, sender=StockIssue)
 def cleanup_issue(sender, instance: StockIssue, **kwargs) -> None:
     _cleanup_record("stock_issue", instance.id)
+
+
+@receiver(post_delete, sender=WorkAcceptanceAct)
+def cleanup_work_acceptance(sender, instance: WorkAcceptanceAct, **kwargs) -> None:
+    _cleanup_record("work_acceptance", instance.id)
 
 
 @receiver(post_delete, sender=WriteOffAct)

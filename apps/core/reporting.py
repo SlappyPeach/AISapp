@@ -32,6 +32,7 @@ REPORT_TITLES = {
     "summary": "Сводный отчет для бухгалтерии",
     "ppe": "Отчет по выданной спецодежде и срокам службы",
     "movements": "Отчет о движении материалов за период",
+    "site_material_report": "Материальный отчет по участку за месяц",
     "consumption": "Статистический отчет по расходу материалов",
     "work_stats": "Статистический отчет по выполненным работам",
 }
@@ -43,6 +44,7 @@ REPORT_CHOICES = [
     ("work", "Работа участков"),
     ("summary", "Сводный (бухгалтерия)"),
     ("movements", "Движение материалов"),
+    ("site_material_report", "Материальный отчет участка"),
     ("consumption", "Статистика по расходу материалов"),
     ("work_stats", "Статистика по выполненным работам"),
     ("ppe", "Выданная спецодежда"),
@@ -1252,6 +1254,7 @@ REPORT_PROVIDERS = {
     "summary": report_summary_scoped_v2,
     "ppe": report_ppe_scoped,
     "movements": report_material_movements_scoped,
+    "site_material_report": report_stock,
     "consumption": report_material_consumption_scoped,
     "work_stats": report_work_statistics_scoped,
 }

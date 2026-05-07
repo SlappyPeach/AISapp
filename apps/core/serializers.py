@@ -10,12 +10,15 @@ from .models import (
     PrimaryDocumentLine,
     ProcurementRequest,
     ProcurementRequestLine,
+    SiteMaterialRequest,
+    SiteMaterialRequestLine,
     StockIssue,
     StockIssueLine,
     StockReceipt,
     StockReceiptLine,
     SupplyContract,
     SupplierDocument,
+    WorkAcceptanceAct,
     WorkLog,
     WriteOffAct,
     WriteOffLine,
@@ -40,6 +43,25 @@ class ProcurementRequestSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProcurementRequest
         fields = ["id", "number", "request_date", "site_name", "supplier_name", "contract_number", "requested_by_name", "status", "notes", "lines"]
+
+
+class SiteMaterialRequestLineSerializer(serializers.ModelSerializer):
+    material_code = serializers.CharField(source="material.code", read_only=True)
+    material_name = serializers.CharField(source="material.name", read_only=True)
+
+    class Meta:
+        model = SiteMaterialRequestLine
+        fields = ["material_code", "material_name", "quantity", "unit_price", "notes"]
+
+
+class SiteMaterialRequestSerializer(serializers.ModelSerializer):
+    contract_number = serializers.CharField(source="contract.number", read_only=True)
+    requested_by_name = serializers.CharField(source="requested_by.full_name_or_username", read_only=True)
+    lines = SiteMaterialRequestLineSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = SiteMaterialRequest
+        fields = ["id", "number", "request_date", "site_name", "contract_number", "requested_by_name", "status", "notes", "lines"]
 
 
 class SupplyContractSerializer(serializers.ModelSerializer):
@@ -159,7 +181,18 @@ class PPEIssuanceLineSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PPEIssuanceLine
-        fields = ["worker_name", "employee_number", "material_name", "material_code", "quantity", "service_life_months", "issue_start_date", "notes"]
+        fields = [
+            "worker_name",
+            "employee_number",
+            "material_name",
+            "material_code",
+            "clothing_size",
+            "shoe_size",
+            "quantity",
+            "service_life_months",
+            "issue_start_date",
+            "notes",
+        ]
 
 
 class PPEIssuanceSerializer(serializers.ModelSerializer):
@@ -176,6 +209,26 @@ class WorkLogSerializer(serializers.ModelSerializer):
     class Meta:
         model = WorkLog
         fields = ["id", "site_name", "contract_number", "work_type", "planned_volume", "actual_volume", "volume_unit", "plan_date", "actual_date", "status", "notes"]
+
+
+class WorkAcceptanceSerializer(serializers.ModelSerializer):
+    contract_number = serializers.CharField(source="contract.number", read_only=True)
+
+    class Meta:
+        model = WorkAcceptanceAct
+        fields = [
+            "id",
+            "number",
+            "act_date",
+            "site_name",
+            "contract_number",
+            "work_description",
+            "accepted_volume",
+            "volume_unit",
+            "amount",
+            "status",
+            "notes",
+        ]
 
 
 class DocumentRecordSerializer(serializers.ModelSerializer):
