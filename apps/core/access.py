@@ -13,6 +13,7 @@ ROLE_SET_OFFICE = {
     RoleChoices.WAREHOUSE,
 }
 ROLE_SET_BACKUP = {RoleChoices.ADMIN}
+ROLE_SET_DOCUMENTS = ROLE_SET_INTERNAL | ROLE_SET_SUPPLIER_PORTAL
 ROLE_SET_ARCHIVE = ROLE_SET_INTERNAL | ROLE_SET_SUPPLIER_PORTAL
 ROLE_SET_REPORTS = ROLE_SET_INTERNAL
 ROLE_SET_ARCHIVE_STATUS_UPDATE = ROLE_SET_ARCHIVE
@@ -33,6 +34,10 @@ ROLE_SET_STAFF = {
 
 def can_access_archive(role: str | None) -> bool:
     return role in ROLE_SET_ARCHIVE
+
+
+def can_access_documents(role: str | None) -> bool:
+    return role in ROLE_SET_DOCUMENTS
 
 
 def can_access_reports(role: str | None) -> bool:

@@ -8,6 +8,7 @@ urlpatterns = [
     path("catalogs/<slug:slug>/", views.catalog_page, name="catalog-page"),
     path("operations/<slug:slug>/", views.operation_page, name="operation-page"),
     path("operations/<slug:slug>/draft/", views.operation_draft, name="operation-draft"),
+    path("documents/", views.documents, name="documents"),
     path("archive/", views.archive, name="archive"),
     path("reports/", views.reports, name="reports"),
     path("backups/", views.backups, name="backups"),

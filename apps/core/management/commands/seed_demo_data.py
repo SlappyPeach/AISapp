@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import dataclass
 from datetime import timedelta
@@ -706,7 +707,7 @@ class Command(BaseCommand):
         for index in range(count):
             contract_payload = contracts[index % len(contracts)]
             supplier = refs["suppliers"][index % len(refs["suppliers"])]
-            creator = contract_payload["site"]["manager"] if index % 2 == 0 else refs["users"][RoleChoices.PROCUREMENT]
+            creator = refs["users"][RoleChoices.PROCUREMENT]
             item_lines = self._recipe_item_lines(contract_payload["recipe"], base_multiplier=Decimal("1.2"), extra_items=index % 2)
             request = create_procurement_request(
                 user=creator,
@@ -1159,21 +1160,36 @@ class Command(BaseCommand):
         return {seed.code_suffix: Material.objects.get(code=f"{self.prefix_upper}-{seed.code_suffix}") for seed in MATERIAL_SEEDS}
 
     def _format_line_items(self, items: list[dict[str, Any]]) -> str:
-        rows = []
-        for item in items:
-            material = item["material"]
-            rows.append(
-                f"{material.code}|{self._decimal_to_str(item['quantity'])}|{self._decimal_to_str(item['unit_price'])}|{item['notes']}"
-            )
-        return "\n".join(rows)
+        return json.dumps(
+            [
+                {
+                    "material_code": item["material"].code,
+                    "quantity": self._decimal_to_str(item["quantity"]),
+                    "unit_price": self._decimal_to_str(item["unit_price"]),
+                    "notes": item["notes"],
+                }
+                for item in items
+            ],
+            ensure_ascii=False,
+        )
 
     def _format_ppe_items(self, items: list[dict[str, Any]]) -> str:
-        rows = []
-        for item in items:
-            rows.append(
-                f"{item['worker'].employee_number}|{item['material'].code}|{self._decimal_to_str(item['quantity'])}|{item['service_life_months']}"
-            )
-        return "\n".join(rows)
+        return json.dumps(
+            [
+                {
+                    "employee_number": item["worker"].employee_number,
+                    "worker_name": item["worker"].full_name,
+                    "material_code": item["material"].code,
+                    "material_name": item["material"].name,
+                    "quantity": self._decimal_to_str(item["quantity"]),
+                    "service_life_months": str(item["service_life_months"]),
+                    "clothing_size": "",
+                    "shoe_size": "",
+                }
+                for item in items
+            ],
+            ensure_ascii=False,
+        )
 
     def _decimal_to_str(self, value: Decimal | str | int | float) -> str:
         if isinstance(value, Decimal):

@@ -269,6 +269,13 @@ class ProcurementRequest(TimeStampedModel):
     request_date = models.DateField()
     site_name = models.CharField(max_length=255)
     contract = models.ForeignKey(SMRContract, null=True, blank=True, on_delete=models.SET_NULL, related_name="procurement_requests")
+    site_request = models.ForeignKey(
+        "SiteMaterialRequest",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="procurement_requests",
+    )
     supplier = models.ForeignKey(Supplier, null=True, blank=True, on_delete=models.SET_NULL, related_name="procurement_requests")
     requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="procurement_requests")
     status = models.CharField(max_length=32, choices=DocumentStatus.choices, default=DocumentStatus.DRAFT)
@@ -284,6 +291,33 @@ class ProcurementRequest(TimeStampedModel):
 class ProcurementRequestLine(models.Model):
     request = models.ForeignKey(ProcurementRequest, on_delete=models.CASCADE, related_name="lines")
     material = models.ForeignKey(Material, on_delete=models.PROTECT, related_name="procurement_lines")
+    quantity = models.DecimalField(max_digits=14, decimal_places=3)
+    unit_price = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    notes = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["material__code"]
+
+
+class SiteMaterialRequest(TimeStampedModel):
+    number = models.CharField(max_length=128, unique=True)
+    request_date = models.DateField()
+    site_name = models.CharField(max_length=255)
+    contract = models.ForeignKey(SMRContract, null=True, blank=True, on_delete=models.SET_NULL, related_name="site_material_requests")
+    requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="site_material_requests")
+    status = models.CharField(max_length=32, choices=DocumentStatus.choices, default=DocumentStatus.DRAFT)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-request_date", "-id"]
+
+    def __str__(self) -> str:
+        return self.number
+
+
+class SiteMaterialRequestLine(models.Model):
+    request = models.ForeignKey(SiteMaterialRequest, on_delete=models.CASCADE, related_name="lines")
+    material = models.ForeignKey(Material, on_delete=models.PROTECT, related_name="site_request_lines")
     quantity = models.DecimalField(max_digits=14, decimal_places=3)
     unit_price = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     notes = models.CharField(max_length=255, blank=True)
@@ -352,6 +386,7 @@ class StockReceipt(TimeStampedModel):
     receipt_date = models.DateField()
     supplier = models.ForeignKey(Supplier, on_delete=models.PROTECT, related_name="stock_receipts")
     supplier_document = models.ForeignKey(SupplierDocument, null=True, blank=True, on_delete=models.SET_NULL, related_name="stock_receipts")
+    primary_document = models.ForeignKey(PrimaryDocument, null=True, blank=True, on_delete=models.SET_NULL, related_name="stock_receipts")
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="stock_receipts")
     status = models.CharField(max_length=32, choices=DocumentStatus.choices, default=DocumentStatus.DRAFT)
     notes = models.TextField(blank=True)
@@ -379,6 +414,8 @@ class StockIssue(TimeStampedModel):
     issue_date = models.DateField()
     site_name = models.CharField(max_length=255)
     contract = models.ForeignKey(SMRContract, null=True, blank=True, on_delete=models.SET_NULL, related_name="stock_issues")
+    site_request = models.ForeignKey(SiteMaterialRequest, null=True, blank=True, on_delete=models.SET_NULL, related_name="stock_issues")
+    stock_receipt = models.ForeignKey(StockReceipt, null=True, blank=True, on_delete=models.SET_NULL, related_name="stock_issues")
     issued_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="stock_issues")
     received_by_name = models.CharField(max_length=255)
     status = models.CharField(max_length=32, choices=DocumentStatus.choices, default=DocumentStatus.DRAFT)
@@ -425,6 +462,26 @@ class WorkLog(TimeStampedModel):
             "delayed": "С задержкой",
         }
         return status_map.get(self.status, self.status)
+
+
+class WorkAcceptanceAct(TimeStampedModel):
+    number = models.CharField(max_length=128, unique=True)
+    act_date = models.DateField()
+    contract = models.ForeignKey(SMRContract, on_delete=models.PROTECT, related_name="acceptance_acts")
+    site_name = models.CharField(max_length=255)
+    work_description = models.TextField(blank=True)
+    accepted_volume = models.DecimalField(max_digits=14, decimal_places=3, null=True, blank=True)
+    volume_unit = models.CharField(max_length=64, blank=True)
+    amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="work_acceptance_acts")
+    status = models.CharField(max_length=32, choices=DocumentStatus.choices, default=DocumentStatus.DRAFT)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-act_date", "-id"]
+
+    def __str__(self) -> str:
+        return self.number
 
 
 class WriteOffAct(TimeStampedModel):
@@ -487,6 +544,8 @@ class PPEIssuanceLine(models.Model):
     quantity = models.DecimalField(max_digits=14, decimal_places=3)
     service_life_months = models.PositiveIntegerField(default=0)
     issue_start_date = models.DateField(null=True, blank=True)
+    clothing_size = models.CharField(max_length=64, blank=True)
+    shoe_size = models.CharField(max_length=64, blank=True)
     notes = models.CharField(max_length=255, blank=True)
 
     class Meta:

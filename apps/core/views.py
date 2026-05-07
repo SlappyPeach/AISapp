@@ -17,17 +17,18 @@ from django.http import FileResponse, Http404, HttpRequest, HttpResponse, JsonRe
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.html import format_html
 
 from .access import (
-    ROLE_SET_ALL,
     ROLE_SET_ARCHIVE,
     ROLE_SET_AUDIT_LOG,
     ROLE_SET_BACKUP,
-    ROLE_SET_OFFICE,
+    ROLE_SET_DOCUMENTS,
     ROLE_SET_REPORTS,
     can_access_archive,
     can_access_audit_log,
     can_access_backups,
+    can_access_documents,
     can_access_reports,
     can_update_archive_status,
 )
@@ -44,6 +45,7 @@ from .forms import (
     PrimaryDocumentCreateForm,
     ProcurementRequestCreateForm,
     ReportFilterForm,
+    SiteMaterialRequestCreateForm,
     SMRContractForm,
     StockIssueCreateForm,
     StockReceiptCreateForm,
@@ -52,6 +54,7 @@ from .forms import (
     SupplyContractForm,
     UserForm,
     WorkerForm,
+    WorkAcceptanceCreateForm,
     WorkLogCreateForm,
     WriteOffCreateForm,
 )
@@ -67,6 +70,7 @@ from .models import (
     PrimaryDocument,
     ProcurementRequest,
     RoleChoices,
+    SiteMaterialRequest,
     SMRContract,
     StockIssue,
     StockReceipt,
@@ -75,6 +79,7 @@ from .models import (
     SupplyContract,
     User,
     Worker,
+    WorkAcceptanceAct,
     WorkLog,
     WriteOffAct,
 )
@@ -85,9 +90,11 @@ from .services import (
     create_ppe_issuance,
     create_primary_document,
     create_procurement_request,
+    create_site_material_request,
     create_supplier_document,
     create_stock_issue,
     create_stock_receipt,
+    create_work_acceptance,
     create_work_log,
     create_writeoff,
     dashboard_metrics,
@@ -122,7 +129,8 @@ CATALOG_CONFIG: dict[str, dict[str, Any]] = {
             ("Категория", lambda obj: obj.category),
             ("СИЗ", lambda obj: obj.is_ppe),
         ],
-        "allowed_roles": ROLE_SET_OFFICE | {RoleChoices.SITE_MANAGER},
+        "allowed_roles": {RoleChoices.ADMIN, RoleChoices.DIRECTOR, RoleChoices.WAREHOUSE},
+        "read_only_roles": {RoleChoices.DIRECTOR, RoleChoices.WAREHOUSE},
     },
     "suppliers": {
         "title": "Справочник поставщиков",
@@ -136,7 +144,7 @@ CATALOG_CONFIG: dict[str, dict[str, Any]] = {
             ("Телефон", lambda obj: obj.phone),
             ("Эл. почта", lambda obj: obj.email),
         ],
-        "allowed_roles": ROLE_SET_OFFICE | {RoleChoices.SITE_MANAGER},
+        "allowed_roles": {RoleChoices.ADMIN, RoleChoices.DIRECTOR, RoleChoices.PROCUREMENT},
     },
     "objects": {
         "title": "Строительные объекты",
@@ -150,7 +158,8 @@ CATALOG_CONFIG: dict[str, dict[str, Any]] = {
             ("Начало", lambda obj: obj.start_date),
             ("Окончание", lambda obj: obj.end_date),
         ],
-        "allowed_roles": ROLE_SET_OFFICE | {RoleChoices.SITE_MANAGER},
+        "allowed_roles": {RoleChoices.ADMIN, RoleChoices.DIRECTOR, RoleChoices.PROCUREMENT, RoleChoices.SITE_MANAGER},
+        "read_only_roles": {RoleChoices.PROCUREMENT, RoleChoices.SITE_MANAGER},
     },
     "workers": {
         "title": "Работники",
@@ -164,7 +173,9 @@ CATALOG_CONFIG: dict[str, dict[str, Any]] = {
             ("Должность", lambda obj: obj.position),
             ("Дата приема", lambda obj: obj.hire_date),
         ],
-        "allowed_roles": ROLE_SET_OFFICE | {RoleChoices.SITE_MANAGER},
+        "allowed_roles": {RoleChoices.ADMIN, RoleChoices.DIRECTOR, RoleChoices.SITE_MANAGER},
+        "scoped_roles": {RoleChoices.SITE_MANAGER},
+        "read_only_roles": {RoleChoices.DIRECTOR, RoleChoices.SITE_MANAGER},
     },
     "norms": {
         "title": "Нормы расхода",
@@ -178,7 +189,8 @@ CATALOG_CONFIG: dict[str, dict[str, Any]] = {
             ("Норма", lambda obj: obj.norm_per_unit),
             ("Ед.", lambda obj: obj.unit or obj.material.unit),
         ],
-        "allowed_roles": ROLE_SET_OFFICE | {RoleChoices.SITE_MANAGER},
+        "allowed_roles": {RoleChoices.ADMIN, RoleChoices.DIRECTOR},
+        "read_only_roles": {RoleChoices.DIRECTOR},
     },
     "contracts": {
         "title": "Договоры СМР",
@@ -197,6 +209,7 @@ CATALOG_CONFIG: dict[str, dict[str, Any]] = {
         "scoped_roles": {RoleChoices.SITE_MANAGER},
         "read_only_roles": {RoleChoices.SITE_MANAGER},
         "save_callback": "save_contract",
+        "entity_type": "smr_contract",
     },
     "supply-contracts": {
         "title": "Договоры поставки",
@@ -214,6 +227,7 @@ CATALOG_CONFIG: dict[str, dict[str, Any]] = {
         "allowed_roles": {RoleChoices.ADMIN, RoleChoices.DIRECTOR, RoleChoices.PROCUREMENT, RoleChoices.SUPPLIER},
         "scoped_roles": {RoleChoices.SUPPLIER},
         "read_only_roles": {RoleChoices.SUPPLIER},
+        "entity_type": "supply_contract",
     },
     "document-types": {
         "title": "Типы документов",
@@ -228,7 +242,7 @@ CATALOG_CONFIG: dict[str, dict[str, Any]] = {
             ("Генерация", lambda obj: obj.available_for_generation),
             ("Активен", lambda obj: obj.is_active),
         ],
-        "allowed_roles": ROLE_SET_OFFICE,
+        "allowed_roles": {RoleChoices.ADMIN},
     },
     "users": {
         "title": "Пользователи",
@@ -250,23 +264,42 @@ CATALOG_CONFIG: dict[str, dict[str, Any]] = {
 
 
 OPERATION_CONFIG: dict[str, dict[str, Any]] = {
-    "procurement": {
-        "title": "Заявки на закупку",
-        "description": "Создание заявок поставщику с перечнем материалов и суммой позиций.",
-        "form_class": ProcurementRequestCreateForm,
-        "handler": create_procurement_request,
-        "queryset": lambda: ProcurementRequest.objects.select_related("supplier", "contract", "requested_by").order_by("-request_date", "-id"),
+    "site-requests": {
+        "title": "Заявки кладовщику",
+        "description": "Заявки начальника участка на материалы со склада.",
+        "form_class": SiteMaterialRequestCreateForm,
+        "handler": create_site_material_request,
+        "queryset": lambda: SiteMaterialRequest.objects.select_related("contract", "requested_by").order_by("-request_date", "-id"),
         "columns": [
             ("Номер", lambda obj: obj.number),
             ("Дата", lambda obj: obj.request_date),
             ("Участок", lambda obj: obj.site_name),
+            ("Договор", lambda obj: obj.contract.number if obj.contract else ""),
+            ("Статус", lambda obj: obj.get_status_display()),
+        ],
+        "allowed_roles": {RoleChoices.ADMIN, RoleChoices.SITE_MANAGER, RoleChoices.WAREHOUSE, RoleChoices.PROCUREMENT},
+        "read_only_roles": {RoleChoices.WAREHOUSE, RoleChoices.PROCUREMENT},
+        "initial": lambda request: {"request_date": date.today(), "site_name": request.user.site_name or ""},
+        "entity_type": "site_material_request",
+    },
+    "procurement": {
+        "title": "Заявки на закупку",
+        "description": "Заявки снабженцу и поставщику на основании заявки участка.",
+        "form_class": ProcurementRequestCreateForm,
+        "handler": create_procurement_request,
+        "queryset": lambda: ProcurementRequest.objects.select_related("supplier", "contract", "site_request", "requested_by").order_by("-request_date", "-id"),
+        "columns": [
+            ("Номер", lambda obj: obj.number),
+            ("Дата", lambda obj: obj.request_date),
+            ("Участок", lambda obj: obj.site_name),
+            ("Заявка участка", lambda obj: obj.site_request.number if obj.site_request else ""),
             ("Поставщик", lambda obj: obj.supplier.name if obj.supplier else ""),
             ("Статус", lambda obj: obj.get_status_display()),
         ],
-        "allowed_roles": {RoleChoices.ADMIN, RoleChoices.PROCUREMENT, RoleChoices.SITE_MANAGER, RoleChoices.SUPPLIER},
+        "allowed_roles": {RoleChoices.ADMIN, RoleChoices.PROCUREMENT, RoleChoices.WAREHOUSE, RoleChoices.SUPPLIER},
         "read_only_roles": {RoleChoices.SUPPLIER},
         "initial": lambda request: {"request_date": date.today(), "site_name": request.user.site_name or ""},
-        "sample_lines": "MAT-001 | 100 | 280.50 | Для объекта\nMAT-002 | 20 | 1500 | Срочно",
+        "entity_type": "procurement_request",
     },
     "supplier-documents": {
         "title": "Документы поставщиков",
@@ -283,8 +316,10 @@ OPERATION_CONFIG: dict[str, dict[str, Any]] = {
             ("Статус", lambda obj: obj.get_status_display()),
         ],
         "allowed_roles": {RoleChoices.ADMIN, RoleChoices.PROCUREMENT, RoleChoices.SUPPLIER},
+        "read_only_roles": {RoleChoices.PROCUREMENT},
         "scope_form_for_supplier": True,
         "initial": lambda request: {"doc_date": date.today(), "supplier": request.user.supplier if request.user.supplier_id else None},
+        "entity_type": "supplier_document",
     },
     "primary-documents": {
         "title": "Первичные документы",
@@ -308,16 +343,16 @@ OPERATION_CONFIG: dict[str, dict[str, Any]] = {
             ("Сумма", lambda obj: obj.amount),
             ("Статус", lambda obj: obj.get_status_display()),
         ],
-        "allowed_roles": {RoleChoices.ADMIN, RoleChoices.PROCUREMENT, RoleChoices.WAREHOUSE},
+        "allowed_roles": {RoleChoices.ADMIN},
         "initial": lambda request: {"doc_date": date.today(), "status": DocumentStatus.DRAFT},
-        "sample_lines": "MAT-001 | 100 | 280.50 | Счет по заявке\nMAT-002 | 20 | 1500 | Поставка на склад",
+        "entity_type": "primary_document",
     },
     "receipts": {
         "title": "Приход на склад",
         "description": "Оформление приходных ордеров и пополнение остатков центрального склада.",
         "form_class": StockReceiptCreateForm,
         "handler": create_stock_receipt,
-        "queryset": lambda: StockReceipt.objects.select_related("supplier", "supplier_document", "created_by").order_by("-receipt_date", "-id"),
+        "queryset": lambda: StockReceipt.objects.select_related("supplier", "supplier_document", "primary_document", "created_by").order_by("-receipt_date", "-id"),
         "columns": [
             ("Номер", lambda obj: obj.number),
             ("Дата", lambda obj: obj.receipt_date),
@@ -325,16 +360,16 @@ OPERATION_CONFIG: dict[str, dict[str, Any]] = {
             ("Документ", lambda obj: obj.supplier_document.doc_number if obj.supplier_document else ""),
             ("Статус", lambda obj: obj.get_status_display()),
         ],
-        "allowed_roles": {RoleChoices.ADMIN, RoleChoices.PROCUREMENT, RoleChoices.WAREHOUSE},
+        "allowed_roles": {RoleChoices.ADMIN, RoleChoices.WAREHOUSE},
         "initial": lambda request: {"receipt_date": date.today()},
-        "sample_lines": "MAT-001 | 50 | 300 | Первая партия",
+        "entity_type": "stock_receipt",
     },
     "issues": {
         "title": "Отпуск материалов",
         "description": "Требования-накладные на передачу материалов с центрального склада на участок.",
         "form_class": StockIssueCreateForm,
         "handler": create_stock_issue,
-        "queryset": lambda: StockIssue.objects.select_related("contract", "issued_by").order_by("-issue_date", "-id"),
+        "queryset": lambda: StockIssue.objects.select_related("contract", "site_request", "stock_receipt", "issued_by").order_by("-issue_date", "-id"),
         "columns": [
             ("Номер", lambda obj: obj.number),
             ("Дата", lambda obj: obj.issue_date),
@@ -344,7 +379,7 @@ OPERATION_CONFIG: dict[str, dict[str, Any]] = {
         ],
         "allowed_roles": {RoleChoices.ADMIN, RoleChoices.WAREHOUSE},
         "initial": lambda request: {"issue_date": date.today(), "site_name": request.user.site_name or ""},
-        "sample_lines": "MAT-001 | 10 | 300 | Передача на объект",
+        "entity_type": "stock_issue",
     },
     "writeoffs": {
         "title": "Акты списания",
@@ -361,6 +396,7 @@ OPERATION_CONFIG: dict[str, dict[str, Any]] = {
         ],
         "allowed_roles": {RoleChoices.ADMIN, RoleChoices.SITE_MANAGER},
         "initial": lambda request: {"act_date": date.today(), "site_name": request.user.site_name or ""},
+        "entity_type": "write_off",
     },
     "ppe": {
         "title": "Выдача спецодежды",
@@ -375,9 +411,27 @@ OPERATION_CONFIG: dict[str, dict[str, Any]] = {
             ("Сезон", lambda obj: obj.season),
             ("Статус", lambda obj: obj.get_status_display()),
         ],
-        "allowed_roles": {RoleChoices.ADMIN, RoleChoices.WAREHOUSE, RoleChoices.SITE_MANAGER},
+        "allowed_roles": {RoleChoices.ADMIN, RoleChoices.SITE_MANAGER},
         "initial": lambda request: {"issue_date": date.today(), "site_name": request.user.site_name or ""},
-        "sample_lines": "EMP-001 | PPE-001 | 1 | 12",
+        "entity_type": "ppe_issuance",
+    },
+    "acceptance": {
+        "title": "Акты сдачи-приемки",
+        "description": "Закрывающий акт по выполненным работам СМР.",
+        "form_class": WorkAcceptanceCreateForm,
+        "handler": create_work_acceptance,
+        "queryset": lambda: WorkAcceptanceAct.objects.select_related("contract", "contract__object", "created_by").order_by("-act_date", "-id"),
+        "columns": [
+            ("Номер", lambda obj: obj.number),
+            ("Дата", lambda obj: obj.act_date),
+            ("Участок", lambda obj: obj.site_name),
+            ("Договор", lambda obj: obj.contract.number),
+            ("Сумма", lambda obj: obj.amount),
+            ("Статус", lambda obj: obj.get_status_display()),
+        ],
+        "allowed_roles": {RoleChoices.ADMIN, RoleChoices.SITE_MANAGER},
+        "initial": lambda request: {"act_date": date.today(), "site_name": request.user.site_name or ""},
+        "entity_type": "work_acceptance",
     },
     "worklogs": {
         "title": "Журнал работ",
@@ -428,14 +482,18 @@ def _material_catalog(*, ppe_only: bool = False) -> list[dict[str, str]]:
     ]
 
 
-def _worker_catalog() -> list[dict[str, str]]:
+def _worker_catalog(user=None) -> list[dict[str, str]]:
+    queryset = Worker.objects.order_by("full_name")
+    if getattr(user, "role", None) == RoleChoices.SITE_MANAGER:
+        site_name = (getattr(user, "site_name", "") or "").strip()
+        queryset = queryset.filter(site_name__iexact=site_name) if site_name else queryset.none()
     return [
         {
             "employee_number": row["employee_number"],
             "full_name": row["full_name"],
             "site_name": row["site_name"],
         }
-        for row in Worker.objects.order_by("employee_number").values("employee_number", "full_name", "site_name")
+        for row in queryset.values("employee_number", "full_name", "site_name")
     ]
 
 
@@ -458,12 +516,19 @@ def _table_rows(queryset, columns: list[tuple[str, Callable[[Any], Any]]], *, li
     return rows
 
 
+def _export_url(entity_type: str | None, item: Any) -> str:
+    if not entity_type or not getattr(item, "pk", None):
+        return ""
+    return reverse("export-document", kwargs={"entity_type": entity_type, "entity_id": item.pk})
+
+
 def _catalog_rows(
     queryset,
     columns: list[tuple[str, Callable[[Any], Any]]],
     *,
     slug: str,
     can_manage: bool,
+    entity_type: str | None = None,
     editing_id: int | None = None,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
@@ -475,7 +540,26 @@ def _catalog_rows(
                 "cells": [_format_value(getter(item)) for _header, getter in columns],
                 "can_manage": can_manage,
                 "edit_url": f"{reverse('catalog-page', kwargs={'slug': slug})}?edit={item.pk}",
+                "export_url": _export_url(entity_type, item),
                 "is_editing": editing_id == item.pk,
+            }
+        )
+    return rows
+
+
+def _operation_rows(
+    queryset,
+    columns: list[tuple[str, Callable[[Any], Any]]],
+    *,
+    entity_type: str | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in queryset[:limit]:
+        rows.append(
+            {
+                "cells": [_format_value(getter(item)) for _header, getter in columns],
+                "export_url": _export_url(entity_type, item),
             }
         )
     return rows
@@ -515,11 +599,13 @@ def _navigation(request: HttpRequest) -> dict[str, Any]:
     return {
         "catalog_links": catalog_links,
         "operation_links": operation_links,
+        "documents_url": reverse("documents"),
         "archive_url": reverse("archive"),
         "reports_url": reverse("reports"),
         "backups_url": reverse("backups"),
         "audit_log_url": reverse("audit-log"),
         "dashboard_url": reverse("dashboard"),
+        "can_access_documents": can_access_documents(role),
         "can_access_archive": can_access_archive(role),
         "can_access_reports": can_access_reports(role),
         "can_access_backups": can_access_backups(role),
@@ -580,7 +666,19 @@ def _can_create_in_config(*, request: HttpRequest, config: dict[str, Any]) -> bo
 
 
 def _scope_operation_form_for_supplier(*, request: HttpRequest, config: dict[str, Any], form) -> None:
-    if getattr(request.user, "role", None) != RoleChoices.SUPPLIER:
+    role = getattr(request.user, "role", None)
+    if "contract" in form.fields:
+        contracts_qs = SMRContract.objects.select_related("object", "created_by").order_by("-contract_date", "-id")
+        if role == RoleChoices.SITE_MANAGER:
+            contracts_qs = filter_queryset_for_user(request.user, contracts_qs)
+        form.fields["contract"].queryset = contracts_qs
+    if "site_request" in form.fields:
+        site_requests_qs = SiteMaterialRequest.objects.select_related("contract", "requested_by").order_by("-request_date", "-id")
+        if role == RoleChoices.SITE_MANAGER:
+            site_requests_qs = filter_queryset_for_user(request.user, site_requests_qs)
+        form.fields["site_request"].queryset = site_requests_qs
+
+    if role != RoleChoices.SUPPLIER:
         return
     if not config.get("scope_form_for_supplier"):
         return
@@ -626,10 +724,12 @@ def dashboard(request: HttpRequest) -> HttpResponse:
         alerts = low_stock_alerts()[:6]
         warehouse_rows = warehouse_balances()[:10]
         site_rows = site_balances()[:10]
+    alert_label = "Заявки участков" if request.user.role == RoleChoices.PROCUREMENT else "Низкие остатки"
     context = {
         "title": "Панель управления",
         "metrics": metrics,
         "alerts": alerts,
+        "alert_label": alert_label,
         "warehouse_rows": warehouse_rows,
         "site_rows": site_rows,
         "recent_documents": recent_documents[:10],
@@ -673,10 +773,22 @@ def catalog_page(request: HttpRequest, slug: str) -> HttpResponse:
         try:
             callback_name = config.get("save_callback")
             if callback_name:
-                SAVE_CALLBACKS[callback_name](form, request)
+                saved_object = SAVE_CALLBACKS[callback_name](form, request)
             else:
-                form.save()
-            messages.success(request, "Запись обновлена." if instance else "Запись успешно сохранена.")
+                saved_object = form.save()
+            entity_type = config.get("entity_type")
+            if entity_type and getattr(saved_object, "pk", None):
+                export_url = reverse("export-document", kwargs={"entity_type": entity_type, "entity_id": saved_object.pk})
+                messages.success(
+                    request,
+                    format_html(
+                        '{} <a href="{}">Скачать Word</a>',
+                        "Запись обновлена." if instance else "Запись успешно сохранена.",
+                        export_url,
+                    ),
+                )
+            else:
+                messages.success(request, "Запись обновлена." if instance else "Запись успешно сохранена.")
             return redirect("catalog-page", slug=slug)
         except Exception as exc:
             form.add_error(None, str(exc))
@@ -692,9 +804,12 @@ def catalog_page(request: HttpRequest, slug: str) -> HttpResponse:
             config["columns"],
             slug=slug,
             can_manage=can_create,
+            entity_type=config.get("entity_type"),
             editing_id=instance.pk if instance else None,
         ),
         "catalog_has_manage_actions": can_create,
+        "catalog_has_export_actions": bool(config.get("entity_type")),
+        "catalog_has_actions": can_create or bool(config.get("entity_type")),
         "is_editing": instance is not None,
         "current_catalog": slug,
     }
@@ -721,9 +836,14 @@ def operation_page(request: HttpRequest, slug: str) -> HttpResponse:
         raise PermissionDenied("Для вашей роли доступен только просмотр операции.")
     if request.method == "POST" and form.is_valid():
         try:
-            config["handler"](user=request.user, cleaned_data=form.cleaned_data, ip_address=_client_ip(request))
+            created_document = config["handler"](user=request.user, cleaned_data=form.cleaned_data, ip_address=_client_ip(request))
             clear_operation_draft(user=request.user, operation_slug=slug)
-            messages.success(request, "Документ успешно создан.")
+            entity_type = config.get("entity_type")
+            if entity_type and getattr(created_document, "pk", None):
+                export_url = reverse("export-document", kwargs={"entity_type": entity_type, "entity_id": created_document.pk})
+                messages.success(request, format_html('Документ успешно создан. <a href="{}">Скачать Word</a>', export_url))
+            else:
+                messages.success(request, "Документ успешно создан.")
             return redirect("operation-page", slug=slug)
         except Exception as exc:
             form.add_error(None, str(exc))
@@ -733,7 +853,7 @@ def operation_page(request: HttpRequest, slug: str) -> HttpResponse:
     if items_field is not None:
         items_mode = items_field.widget.attrs.get("data-items-mode", "")
     material_catalog = _material_catalog(ppe_only=items_mode == "ppe-lines") if items_mode else []
-    worker_catalog = _worker_catalog() if items_mode == "ppe-lines" else []
+    worker_catalog = _worker_catalog(request.user) if items_mode == "ppe-lines" else []
 
     queryset = filter_queryset_for_user(request.user, config["queryset"]())
     context = {
@@ -741,8 +861,8 @@ def operation_page(request: HttpRequest, slug: str) -> HttpResponse:
         "description": config["description"],
         "form": form,
         "headers": [header for header, _getter in config["columns"]],
-        "rows": _table_rows(queryset, config["columns"]),
-        "sample_lines": config.get("sample_lines", ""),
+        "rows": _operation_rows(queryset, config["columns"], entity_type=config.get("entity_type")),
+        "operation_has_export_actions": bool(config.get("entity_type")),
         "current_operation": slug,
         "autosave_url": reverse("operation-draft", kwargs={"slug": slug}),
         "draft_loaded": bool(draft_payload),
@@ -781,8 +901,8 @@ def operation_draft(request: HttpRequest, slug: str) -> JsonResponse:
 
 
 @login_required
-def archive(request: HttpRequest) -> HttpResponse:
-    _require_roles(request, ROLE_SET_ARCHIVE)
+def documents(request: HttpRequest) -> HttpResponse:
+    _require_roles(request, ROLE_SET_DOCUMENTS)
     can_manage_status = can_update_archive_status(getattr(request.user, "role", None))
 
     if request.method == "POST":
@@ -797,11 +917,11 @@ def archive(request: HttpRequest) -> HttpResponse:
             messages.success(request, f"Статус документа {record.doc_number} обновлен.")
         except Exception as exc:
             messages.error(request, str(exc))
-        return redirect("archive")
+        return redirect("documents")
 
     form = ArchiveFilterForm(request.GET or None)
     filters = form.cleaned_data if form.is_valid() else {}
-    records = document_records(filters, user=request.user)
+    records = document_records(filters, user=request.user, active_only=True)
     for record in records:
         record.available_status_choices = [(record.status, record.get_status_display())]
         if can_manage_status:
@@ -811,9 +931,33 @@ def archive(request: HttpRequest) -> HttpResponse:
                     record.available_status_choices.append((value, label))
         record.can_update_status = can_manage_status and len(record.available_status_choices) > 1
     context = {
-        "title": "Архив документов",
+        "title": "Документы в работе",
         "form": form,
         "records": records,
+        "can_manage_status": can_manage_status,
+        "is_archive": False,
+    }
+    return _render(request, "core/archive.html", context)
+
+
+@login_required
+def archive(request: HttpRequest) -> HttpResponse:
+    _require_roles(request, ROLE_SET_ARCHIVE)
+    if request.method == "POST":
+        raise PermissionDenied("Архив закрытых документов доступен только для просмотра.")
+
+    form = ArchiveFilterForm(request.GET or None)
+    filters = form.cleaned_data if form.is_valid() else {}
+    records = document_records(filters, user=request.user, archived_only=True)
+    for record in records:
+        record.available_status_choices = [(record.status, record.get_status_display())]
+        record.can_update_status = False
+    context = {
+        "title": "Архив закрытых документов",
+        "form": form,
+        "records": records,
+        "can_manage_status": False,
+        "is_archive": True,
     }
     return _render(request, "core/archive.html", context)
 

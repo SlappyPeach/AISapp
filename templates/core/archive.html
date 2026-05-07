@@ -3,8 +3,13 @@
 {% block content %}
 <section class="panel">
     <div class="panel-head">
-        <h3>Фильтры архива</h3>
+        <h3>{% if is_archive %}Фильтры архива{% else %}Фильтры документов{% endif %}</h3>
     </div>
+    {% if is_archive %}
+        <p class="field-help">В архив попадают только документы со статусом «Принят» и датой не позже текущей.</p>
+    {% else %}
+        <p class="field-help">Здесь находятся документы, которые еще проходят согласование, проверку или передачу в бухгалтерию.</p>
+    {% endif %}
     <form method="get" class="filter-grid">
         {% for field in form %}
             <div class="field">
@@ -65,7 +70,7 @@
                                         </select>
                                         <button type="submit" class="secondary-button">Обновить</button>
                                     </form>
-                                {% else %}
+                                {% elif not is_archive %}
                                     <span class="field-help">Нет доступных переходов</span>
                                 {% endif %}
                             </div>

@@ -13,7 +13,9 @@ from .models import (
     MaterialNorm,
     ProcurementRequest,
     RoleChoices,
+    SiteMaterialRequest,
     SMRContract,
+    PrimaryDocument,
     StockReceipt,
     Supplier,
     SupplierDocument,
@@ -101,15 +103,47 @@ def _upload_document_type_choices() -> list[tuple[str, str]]:
 
 class ProcurementRequestCreateForm(BaseStyledForm, forms.Form):
     request_date = forms.DateField(widget=DateInput(), initial=timezone.localdate, label="Дата заявки")
-    site_name = forms.CharField(max_length=255, label="Участок")
+    site_request = forms.ModelChoiceField(
+        queryset=SiteMaterialRequest.objects.order_by("-request_date"),
+        required=False,
+        label="Заявка участка",
+        help_text="Если выбрана заявка участка, позиции, участок и договор можно взять из нее.",
+    )
+    site_name = forms.CharField(max_length=255, required=False, label="Участок")
     contract = forms.ModelChoiceField(queryset=SMRContract.objects.order_by("-contract_date"), required=False, label="Договор СМР")
     supplier = forms.ModelChoiceField(queryset=Supplier.objects.order_by("name"), required=False, label="Поставщик")
     status = forms.ChoiceField(choices=WORKFLOW_ENTRY_STATUS_CHOICES, initial=DocumentStatus.DRAFT, label="Статус")
     notes = forms.CharField(required=False, widget=forms.Textarea(attrs={"rows": 3}), label="Комментарий")
     items = forms.CharField(
+        required=False,
         widget=forms.HiddenInput(attrs={"data-items-mode": "material-lines"}),
         label="Позиции",
-        help_text="Формат строки: КОД | КОЛИЧЕСТВО | ЦЕНА | ПРИМЕЧАНИЕ",
+        help_text="Заполните позиции или выберите заявку участка.",
+    )
+
+    def clean_items(self):
+        items = self.cleaned_data.get("items", "")
+        if items:
+            parse_line_items(items)
+        return items
+
+    def clean(self):
+        cleaned_data = super().clean()
+        if not cleaned_data.get("items") and not cleaned_data.get("site_request"):
+            raise forms.ValidationError("Заполните позиции или выберите заявку участка.")
+        return cleaned_data
+
+
+class SiteMaterialRequestCreateForm(BaseStyledForm, forms.Form):
+    request_date = forms.DateField(widget=DateInput(), initial=timezone.localdate, label="Дата заявки")
+    site_name = forms.CharField(max_length=255, label="Участок")
+    contract = forms.ModelChoiceField(queryset=SMRContract.objects.order_by("-contract_date"), required=False, label="Договор СМР")
+    status = forms.ChoiceField(choices=WORKFLOW_ENTRY_STATUS_CHOICES, initial=DocumentStatus.DRAFT, label="Статус")
+    notes = forms.CharField(required=False, widget=forms.Textarea(attrs={"rows": 3}), label="Комментарий")
+    items = forms.CharField(
+        widget=forms.HiddenInput(attrs={"data-items-mode": "material-lines"}),
+        label="Материалы",
+        help_text="Заявка начальника участка кладовщику: материал, количество и примечание.",
     )
 
     def clean_items(self):
@@ -163,7 +197,7 @@ class PrimaryDocumentCreateForm(BaseStyledForm, forms.Form):
         required=False,
         widget=forms.HiddenInput(attrs={"data-items-mode": "material-lines"}),
         label="Позиции",
-        help_text="Если оставить поле пустым, позиции будут взяты из заявки или приходного документа. Формат строки: КОД | КОЛИЧЕСТВО | ЦЕНА | ПРИМЕЧАНИЕ",
+        help_text="Если оставить поле пустым, позиции будут взяты из заявки или приходного документа.",
     )
 
     def __init__(self, *args, **kwargs):
@@ -179,62 +213,105 @@ class PrimaryDocumentCreateForm(BaseStyledForm, forms.Form):
 
 class StockReceiptCreateForm(BaseStyledForm, forms.Form):
     receipt_date = forms.DateField(widget=DateInput(), initial=timezone.localdate, label="Дата прихода")
-    supplier = forms.ModelChoiceField(queryset=Supplier.objects.order_by("name"), label="Поставщик")
+    supplier = forms.ModelChoiceField(queryset=Supplier.objects.order_by("name"), required=False, label="Поставщик")
     supplier_document = forms.ModelChoiceField(queryset=SupplierDocument.objects.none(), required=False, label="Документ поставщика")
+    primary_document = forms.ModelChoiceField(
+        queryset=PrimaryDocument.objects.none(),
+        required=False,
+        label="Товарная накладная / УПД",
+        help_text="Если выбрана накладная, материалы и цены будут взяты из нее.",
+    )
     status = forms.ChoiceField(choices=WORKFLOW_ENTRY_STATUS_CHOICES, initial=DocumentStatus.DRAFT, label="Статус")
     notes = forms.CharField(required=False, widget=forms.Textarea(attrs={"rows": 3}), label="Комментарий")
     items = forms.CharField(
+        required=False,
         widget=forms.HiddenInput(attrs={"data-items-mode": "material-lines"}),
         label="Позиции",
-        help_text="Формат строки: КОД | КОЛИЧЕСТВО | ЦЕНА | ПРИМЕЧАНИЕ",
+        help_text="Заполните позиции или выберите товарную накладную / УПД.",
     )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields["supplier_document"].queryset = SupplierDocument.objects.order_by("-doc_date")
+        self.fields["primary_document"].queryset = (
+            PrimaryDocument.objects.select_related("document_type", "supplier")
+            .filter(document_type__code__in=["goods_waybill", "upd", "receipt_invoice"])
+            .order_by("-doc_date")
+        )
 
     def clean_items(self):
-        items = self.cleaned_data["items"]
-        parse_line_items(items)
+        items = self.cleaned_data.get("items", "")
+        if items:
+            parse_line_items(items)
         return items
 
     def clean(self):
         cleaned_data = super().clean()
         supplier = cleaned_data.get("supplier")
         supplier_document = cleaned_data.get("supplier_document")
+        primary_document = cleaned_data.get("primary_document")
+        if not supplier and primary_document:
+            cleaned_data["supplier"] = primary_document.supplier
+            supplier = primary_document.supplier
+        if not supplier:
+            raise forms.ValidationError("Укажите поставщика или выберите товарную накладную / УПД.")
         if supplier and supplier_document and supplier_document.supplier_id != supplier.id:
             raise forms.ValidationError("Документ поставщика должен принадлежать выбранному поставщику.")
+        if supplier and primary_document and primary_document.supplier_id != supplier.id:
+            raise forms.ValidationError("Товарная накладная должна принадлежать выбранному поставщику.")
+        if not cleaned_data.get("items") and not primary_document:
+            raise forms.ValidationError("Заполните позиции или выберите товарную накладную / УПД.")
         return cleaned_data
 
 
 class StockIssueCreateForm(BaseStyledForm, forms.Form):
     issue_date = forms.DateField(widget=DateInput(), initial=timezone.localdate, label="Дата отпуска")
-    site_name = forms.CharField(max_length=255, label="Участок")
+    site_name = forms.CharField(max_length=255, required=False, label="Участок")
+    site_request = forms.ModelChoiceField(
+        queryset=SiteMaterialRequest.objects.order_by("-request_date"),
+        required=False,
+        label="Заявка участка",
+        help_text="Если выбрана заявка участка, позиции можно взять из нее.",
+    )
     contract = forms.ModelChoiceField(queryset=SMRContract.objects.order_by("-contract_date"), required=False, label="Договор СМР")
+    stock_receipt = forms.ModelChoiceField(queryset=StockReceipt.objects.order_by("-receipt_date"), required=False, label="Приходный ордер")
     received_by_name = forms.CharField(max_length=255, label="Получатель")
     status = forms.ChoiceField(choices=WORKFLOW_ENTRY_STATUS_CHOICES, initial=DocumentStatus.DRAFT, label="Статус")
     notes = forms.CharField(required=False, widget=forms.Textarea(attrs={"rows": 3}), label="Комментарий")
     items = forms.CharField(
+        required=False,
         widget=forms.HiddenInput(attrs={"data-items-mode": "material-lines"}),
         label="Позиции",
-        help_text="Формат строки: КОД | КОЛИЧЕСТВО | ЦЕНА | ПРИМЕЧАНИЕ",
+        help_text="Заполните позиции или выберите заявку участка.",
     )
 
     def clean_items(self):
-        items = self.cleaned_data["items"]
-        parse_line_items(items)
+        items = self.cleaned_data.get("items", "")
+        if items:
+            parse_line_items(items)
         return items
+
+    def clean(self):
+        cleaned_data = super().clean()
+        if not cleaned_data.get("items") and not cleaned_data.get("site_request"):
+            raise forms.ValidationError("Заполните позиции или выберите заявку участка.")
+        return cleaned_data
 
 
 class WriteOffCreateForm(BaseStyledForm, forms.Form):
     act_date = forms.DateField(widget=DateInput(), initial=timezone.localdate, label="Дата акта")
     contract = forms.ModelChoiceField(queryset=SMRContract.objects.order_by("-contract_date"), label="Договор СМР")
     site_name = forms.CharField(max_length=255, label="Участок")
-    work_type = forms.CharField(max_length=255, label="Вид работ")
-    work_volume = forms.DecimalField(max_digits=14, decimal_places=3, label="Объем работ")
+    work_type = forms.CharField(max_length=255, required=False, label="Вид работ")
+    work_volume = forms.DecimalField(max_digits=14, decimal_places=3, required=False, label="Объем работ")
     volume_unit = forms.CharField(max_length=64, required=False, label="Единица объема")
     status = forms.ChoiceField(choices=WORKFLOW_ENTRY_STATUS_CHOICES, initial=DocumentStatus.DRAFT, label="Статус")
-    notes = forms.CharField(required=False, widget=forms.Textarea(attrs={"rows": 3}), label="Комментарий")
+    notes = forms.CharField(
+        required=False,
+        widget=forms.Textarea(attrs={"rows": 3}),
+        label="Комментарий",
+        help_text="Если вид работ или объем не заполнены, система возьмет их из договора СМР.",
+    )
 
 
 class PPEIssuanceCreateForm(BaseStyledForm, forms.Form):
@@ -246,7 +323,7 @@ class PPEIssuanceCreateForm(BaseStyledForm, forms.Form):
     items = forms.CharField(
         widget=forms.HiddenInput(attrs={"data-items-mode": "ppe-lines"}),
         label="Позиции",
-        help_text="Формат строки: ТАБЕЛЬНЫЙ_НОМЕР | КОД_МАТЕРИАЛА | КОЛИЧЕСТВО | СРОК_СЛУЖБЫ_МЕС",
+        help_text="Выберите ФИО работника и наименование спецодежды, табельный номер и код подставятся автоматически.",
     )
 
     def clean_items(self):
@@ -265,6 +342,18 @@ class WorkLogCreateForm(BaseStyledForm, forms.Form):
     plan_date = forms.DateField(widget=DateInput(), required=False, label="Плановая дата")
     actual_date = forms.DateField(widget=DateInput(), required=False, label="Фактическая дата")
     status = forms.CharField(max_length=64, initial="Запланировано", label="Статус")
+    notes = forms.CharField(required=False, widget=forms.Textarea(attrs={"rows": 3}), label="Комментарий")
+
+
+class WorkAcceptanceCreateForm(BaseStyledForm, forms.Form):
+    act_date = forms.DateField(widget=DateInput(), initial=timezone.localdate, label="Дата акта")
+    contract = forms.ModelChoiceField(queryset=SMRContract.objects.order_by("-contract_date"), label="Договор СМР")
+    site_name = forms.CharField(max_length=255, label="Участок")
+    work_description = forms.CharField(required=False, widget=forms.Textarea(attrs={"rows": 3}), label="Описание выполненных работ")
+    accepted_volume = forms.DecimalField(max_digits=14, decimal_places=3, required=False, label="Принятый объем")
+    volume_unit = forms.CharField(max_length=64, required=False, label="Единица объема")
+    amount = forms.DecimalField(max_digits=14, decimal_places=2, required=False, label="Сумма по акту")
+    status = forms.ChoiceField(choices=WORKFLOW_ENTRY_STATUS_CHOICES, initial=DocumentStatus.DRAFT, label="Статус")
     notes = forms.CharField(required=False, widget=forms.Textarea(attrs={"rows": 3}), label="Комментарий")
 
 
