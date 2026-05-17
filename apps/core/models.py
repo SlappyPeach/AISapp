@@ -48,6 +48,18 @@ class DocumentStatus(models.TextChoices):
     SUPPLY_CONFIRMED = "supply_confirmed", "Подтверждение поставки"
 
 
+class NotificationType(models.TextChoices):
+    DOCUMENT_CREATED = "document_created", "Создан документ"
+    STATUS_CHANGED = "status_changed", "Изменен статус"
+    ACTION_REQUIRED = "action_required", "Требуется действие"
+    LOW_STOCK = "low_stock", "Низкий остаток"
+
+
+class WriteOffTemplateVariant(models.TextChoices):
+    CONTRACT = "contract", "По договору СМР"
+    PRODUCTION_ECONOMIC = "production_economic", "На производственно-хозяйственные нужды"
+
+
 class DocumentType(TimeStampedModel):
     code = models.CharField(max_length=64, unique=True)
     name = models.CharField(max_length=128, unique=True)
@@ -488,6 +500,11 @@ class WriteOffAct(TimeStampedModel):
     number = models.CharField(max_length=128, unique=True)
     act_date = models.DateField()
     contract = models.ForeignKey(SMRContract, on_delete=models.PROTECT, related_name="write_off_acts")
+    template_variant = models.CharField(
+        max_length=32,
+        choices=WriteOffTemplateVariant.choices,
+        default=WriteOffTemplateVariant.CONTRACT,
+    )
     site_name = models.CharField(max_length=255)
     work_type = models.CharField(max_length=255)
     work_volume = models.DecimalField(max_digits=14, decimal_places=3)
@@ -522,6 +539,14 @@ class PPEIssuance(TimeStampedModel):
     site_name = models.CharField(max_length=255)
     season = models.CharField(max_length=64, blank=True)
     issued_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="ppe_issuances")
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="confirmed_ppe_issuances",
+    )
+    confirmed_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=32, choices=DocumentStatus.choices, default=DocumentStatus.DRAFT)
     notes = models.TextField(blank=True)
 
@@ -646,6 +671,39 @@ class DocumentRecord(TimeStampedModel):
             models.Index(fields=["doc_type", "doc_date"]),
             models.Index(fields=["status", "doc_date"]),
         ]
+
+
+class Notification(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="notifications")
+    kind = models.CharField(max_length=64, choices=NotificationType.choices)
+    title = models.CharField(max_length=255)
+    message = models.TextField(blank=True)
+    entity_type = models.CharField(max_length=64, blank=True)
+    entity_id = models.PositiveBigIntegerField(null=True, blank=True)
+    document_record = models.ForeignKey(
+        DocumentRecord,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="notifications",
+    )
+    is_read = models.BooleanField(default=False)
+    read_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["user", "is_read", "created_at"]),
+            models.Index(fields=["entity_type", "entity_id"]),
+        ]
+
+    def mark_read(self) -> None:
+        if self.is_read:
+            return
+        self.is_read = True
+        self.read_at = timezone.now()
+        self.save(update_fields=["is_read", "read_at"])
 
 
 class FormDraft(TimeStampedModel):

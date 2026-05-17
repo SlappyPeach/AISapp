@@ -4,6 +4,7 @@ from rest_framework import serializers
 
 from .models import (
     DocumentRecord,
+    Notification,
     PPEIssuance,
     PPEIssuanceLine,
     PrimaryDocument,
@@ -250,6 +251,25 @@ class DocumentRecordSerializer(serializers.ModelSerializer):
             "created_by_name",
             "file_path",
             "metadata_json",
+        ]
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    document_number = serializers.CharField(source="document_record.doc_number", read_only=True)
+
+    class Meta:
+        model = Notification
+        fields = [
+            "id",
+            "kind",
+            "title",
+            "message",
+            "entity_type",
+            "entity_id",
+            "document_number",
+            "is_read",
+            "read_at",
+            "created_at",
         ]
 
 

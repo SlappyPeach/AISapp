@@ -8,10 +8,11 @@ from rest_framework.views import APIView
 from rest_framework.viewsets import ReadOnlyModelViewSet
 
 from .access import ROLE_SET_INTERNAL, ROLE_SET_SUPPLIER_PORTAL
-from .models import DocumentRecord, PPEIssuance, PrimaryDocument, ProcurementRequest, RoleChoices, SiteMaterialRequest, StockIssue, StockReceipt, SupplierDocument, SupplyContract, WorkAcceptanceAct, WorkLog, WriteOffAct
+from .models import DocumentRecord, Notification, PPEIssuance, PrimaryDocument, ProcurementRequest, RoleChoices, SiteMaterialRequest, StockIssue, StockReceipt, SupplierDocument, SupplyContract, WorkAcceptanceAct, WorkLog, WriteOffAct
 from .serializers import (
     DocumentRecordSerializer,
     MetricSerializer,
+    NotificationSerializer,
     PPEIssuanceSerializer,
     PrimaryDocumentSerializer,
     ProcurementRequestSerializer,
@@ -72,6 +73,21 @@ class DocumentRecordViewSet(RoleScopedReadOnlyViewSet):
         search = self.request.query_params.get("search")
         if search:
             queryset = queryset.filter(search_text__icontains=search)
+        return queryset
+
+
+class NotificationViewSet(RoleScopedReadOnlyViewSet):
+    serializer_class = NotificationSerializer
+    queryset = Notification.objects.select_related("document_record").order_by("-created_at", "-id")
+    allowed_roles = ROLE_SET_INTERNAL | ROLE_SET_SUPPLIER_PORTAL
+
+    def get_queryset(self):
+        queryset = self.get_scoped_queryset()
+        is_read = self.request.query_params.get("is_read")
+        if is_read in {"0", "false", "False"}:
+            queryset = queryset.filter(is_read=False)
+        elif is_read in {"1", "true", "True"}:
+            queryset = queryset.filter(is_read=True)
         return queryset
 
 
@@ -180,6 +196,7 @@ class LowStockAlertsAPIView(RoleScopedAPIView):
 
 router = DefaultRouter()
 router.register("documents", DocumentRecordViewSet, basename="api-documents")
+router.register("notifications", NotificationViewSet, basename="api-notifications")
 router.register("procurement-requests", ProcurementRequestViewSet, basename="api-procurement-requests")
 router.register("site-material-requests", SiteMaterialRequestViewSet, basename="api-site-material-requests")
 router.register("supply-contracts", SupplyContractViewSet, basename="api-supply-contracts")

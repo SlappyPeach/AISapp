@@ -9,6 +9,7 @@ from .models import (
     DocumentRecord,
     Material,
     MaterialNorm,
+    Notification,
     PPEIssuance,
     PPEIssuanceLine,
     ProcurementRequest,
@@ -170,15 +171,15 @@ class WorkAcceptanceActAdmin(admin.ModelAdmin):
 
 @admin.register(WriteOffAct)
 class WriteOffActAdmin(admin.ModelAdmin):
-    list_display = ("number", "act_date", "site_name", "work_type", "status")
+    list_display = ("number", "act_date", "site_name", "work_type", "template_variant", "status")
     search_fields = ("number", "site_name", "work_type")
-    list_filter = ("status",)
+    list_filter = ("status", "template_variant")
     inlines = [WriteOffLineInline]
 
 
 @admin.register(PPEIssuance)
 class PPEIssuanceAdmin(admin.ModelAdmin):
-    list_display = ("number", "issue_date", "site_name", "season", "status")
+    list_display = ("number", "issue_date", "site_name", "season", "confirmed_by", "confirmed_at", "status")
     search_fields = ("number", "site_name")
     list_filter = ("status", "season")
     inlines = [PPELineInline]
@@ -196,6 +197,14 @@ class DocumentRecordAdmin(admin.ModelAdmin):
     list_display = ("doc_type", "doc_number", "doc_date", "status", "counterparty", "object_name")
     search_fields = ("doc_type", "doc_number", "counterparty", "object_name", "search_text")
     list_filter = ("status", "doc_type")
+
+
+@admin.register(Notification)
+class NotificationAdmin(admin.ModelAdmin):
+    list_display = ("created_at", "user", "kind", "title", "is_read")
+    search_fields = ("title", "message", "entity_type")
+    list_filter = ("kind", "is_read", "created_at")
+    readonly_fields = ("created_at", "read_at")
 
 
 @admin.register(AuditLog)

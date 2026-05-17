@@ -1,5 +1,7 @@
 ﻿{% extends "base.html" %}
 
+{% load static %}
+
 {% block content %}
 <section class="hero-panel">
     <p>{{ description }}</p>
@@ -8,78 +10,111 @@
 {% if created_export_url %}
 <section class="panel">
     <div class="panel-head">
-        <h3>Word готов</h3>
+        <h3>Файл готов</h3>
     </div>
     <div class="action-row">
-        <a class="primary-button" href="{{ created_export_url }}">Скачать Word</a>
+        <a class="primary-button" href="{{ created_export_url }}">Скачать файл</a>
         <a class="ghost-button" href="{{ documents_url }}">Документы в работе</a>
     </div>
 </section>
 {% endif %}
 
-<section class="content-grid">
-    <article class="panel">
-        <div class="panel-head">
-            <h3>Создать документ</h3>
-        </div>
+<section class="workspace-shell" data-workspace-tabs data-default-workspace="{% if is_rework_edit or form.errors or draft_loaded %}create{% elif created_export_url or not can_create %}recent{% endif %}">
+    <div class="workspace-switcher" role="list" aria-label="Выбор рабочей области">
         {% if can_create %}
-            <form method="post" enctype="multipart/form-data" class="stack-form" data-autosave-url="{{ autosave_url }}">
-                {% csrf_token %}
-                <div class="field-help" id="draft-status">
-                    {% if draft_loaded %}
-                        Загружен автосохраненный черновик.
-                    {% else %}
-                        Черновик сохраняется автоматически.
-                    {% endif %}
-                </div>
-                {% if form.non_field_errors %}
-                    <div class="field-error">{{ form.non_field_errors|join:", " }}</div>
-                {% endif %}
-                {% for field in form %}
-                    {% if field.name == "items" %}
-                        <div class="field">
-                            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-                            {{ field }}
-                            <div class="items-grid" data-items-grid>
-                                <div class="table-wrap">
-                                    <table class="items-table">
-                                        <thead data-items-head></thead>
-                                        <tbody data-items-body></tbody>
-                                    </table>
-                                </div>
-                                <div class="action-row">
-                                    <button type="button" class="secondary-button" data-items-add>Добавить строку</button>
-                                    <button type="button" class="ghost-button" data-items-clear>Очистить строки</button>
-                                </div>
-                            </div>
-                            {% if field.help_text %}
-                                <div class="field-help">{{ field.help_text }}</div>
-                            {% endif %}
-                            {% if field.errors %}
-                                <div class="field-error">{{ field.errors|join:", " }}</div>
-                            {% endif %}
-                        </div>
-                    {% else %}
-                        <div class="field">
-                            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-                            {{ field }}
-                            {% if field.help_text %}
-                                <div class="field-help">{{ field.help_text }}</div>
-                            {% endif %}
-                            {% if field.errors %}
-                                <div class="field-error">{{ field.errors|join:", " }}</div>
-                            {% endif %}
-                        </div>
-                    {% endif %}
-                {% endfor %}
-                <button type="submit" class="primary-button">Создать</button>
-            </form>
-        {% else %}
-            <div class="field-help">Для вашей роли доступен только просмотр списка.</div>
+            <button type="button" class="workspace-choice" data-workspace-trigger="create" aria-controls="workspace-create" aria-pressed="false">
+                <span class="workspace-choice-icon" aria-hidden="true"><svg class="bi"><use href="{% static 'vendor/bootstrap-icons/bootstrap-icons.svg' %}#clipboard-check"></use></svg></span>
+                <span class="workspace-choice-copy">
+                    <strong>{% if is_rework_edit %}Доработать документ{% else %}Создать документ{% endif %}</strong>
+                    <span>{% if is_rework_edit %}Открыть форму повторной отправки{% else %}Открыть форму на всю рабочую область{% endif %}</span>
+                </span>
+            </button>
         {% endif %}
-    </article>
+        <button type="button" class="workspace-choice" data-workspace-trigger="recent" aria-controls="workspace-recent" aria-pressed="false">
+            <span class="workspace-choice-icon" aria-hidden="true"><svg class="bi"><use href="{% static 'vendor/bootstrap-icons/bootstrap-icons.svg' %}#journal-text"></use></svg></span>
+            <span class="workspace-choice-copy">
+                <strong>Последние документы</strong>
+                <span>Открыть список документов на всю рабочую область</span>
+            </span>
+        </button>
+    </div>
 
-    <article class="panel panel-wide">
+    <div class="workspace-empty" data-workspace-empty>
+        Выберите, с каким блоком работать: создание документа или последние документы.
+    </div>
+
+    <div class="workspace-panels">
+    {% if can_create %}
+    <article class="panel workspace-panel" id="workspace-create" data-workspace-panel="create" hidden>
+        <div class="panel-head">
+            <h3>{% if is_rework_edit %}Доработать документ{% else %}Создать документ{% endif %}</h3>
+        </div>
+        <form method="post" enctype="multipart/form-data" class="stack-form" data-autosave-url="{% if not is_rework_edit %}{{ autosave_url }}{% endif %}">
+            {% csrf_token %}
+            {% if is_rework_edit %}
+                <input type="hidden" name="rework_record_id" value="{{ rework_record.id }}">
+            {% endif %}
+            <div class="field-help" id="draft-status">
+                {% if is_rework_edit %}
+                    Внесите правки и сохраните: документ будет повторно отправлен по маршруту согласования.
+                {% elif draft_loaded %}
+                    Загружен автосохраненный черновик.
+                {% else %}
+                    Черновик сохраняется автоматически.
+                {% endif %}
+            </div>
+            {% if is_rework_edit and rework_reason %}
+                <div class="field-help rework-reason-note">
+                    <strong>Причина возврата:</strong> {{ rework_reason }}
+                    {% if rework_reason_by %}<span>({{ rework_reason_by }})</span>{% endif %}
+                </div>
+            {% endif %}
+            {% if form.non_field_errors %}
+                <div class="field-error">{{ form.non_field_errors|join:", " }}</div>
+            {% endif %}
+            {% for field in form %}
+                {% if field.name == "items" %}
+                    <div class="field">
+                        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                        {{ field }}
+                        <div class="items-grid" data-items-grid>
+                            <div class="table-wrap">
+                                <table class="items-table">
+                                    <thead data-items-head></thead>
+                                    <tbody data-items-body></tbody>
+                                </table>
+                            </div>
+                            <div class="action-row">
+                                <button type="button" class="secondary-button" data-items-add>Добавить строку</button>
+                                <button type="button" class="ghost-button" data-items-clear>Очистить строки</button>
+                            </div>
+                        </div>
+                        {% if field.help_text %}
+                            <div class="field-help">{{ field.help_text }}</div>
+                        {% endif %}
+                        {% if field.errors %}
+                            <div class="field-error">{{ field.errors|join:", " }}</div>
+                        {% endif %}
+                    </div>
+                {% else %}
+                    <div class="field">
+                        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                        {{ field }}
+                        {% if field.help_text %}
+                            <div class="field-help">{{ field.help_text }}</div>
+                        {% endif %}
+                        {% if field.errors %}
+                            <div class="field-error">{{ field.errors|join:", " }}</div>
+                        {% endif %}
+                    </div>
+                {% endif %}
+            {% endfor %}
+            <button type="submit" class="primary-button">{% if is_rework_edit %}Сохранить и отправить повторно{% else %}Создать{% endif %}</button>
+        </form>
+    </article>
+    {% endif %}
+
+    <article class="panel panel-wide workspace-panel" id="workspace-recent" data-workspace-panel="recent" hidden>
         <div class="panel-head">
             <h3>Последние документы</h3>
         </div>
@@ -91,7 +126,7 @@
                             <th>{{ header }}</th>
                         {% endfor %}
                         {% if operation_has_export_actions %}
-                            <th>Word</th>
+                            <th>Экспорт</th>
                         {% endif %}
                     </tr>
                 </thead>
@@ -116,6 +151,7 @@
             </table>
         </div>
     </article>
+    </div>
 </section>
 
 {{ material_catalog|json_script:"material-catalog-data" }}
@@ -137,6 +173,7 @@
     };
 
     const saveDraft = async () => {
+        if (!autosaveUrl) return;
         try {
             const response = await fetch(autosaveUrl, {
                 method: "POST",
@@ -160,6 +197,7 @@
     };
 
     const scheduleSave = () => {
+        if (!autosaveUrl) return;
         updateStatus("Сохраняем черновик...");
         window.clearTimeout(timerId);
         timerId = window.setTimeout(saveDraft, 900);
