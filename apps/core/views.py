@@ -17,6 +17,7 @@ from django.http import FileResponse, Http404, HttpRequest, HttpResponse, JsonRe
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.http import url_has_allowed_host_and_scheme
 
 from .access import (
     ROLE_SET_ARCHIVE,
@@ -85,6 +86,7 @@ from .models import (
 from .reporting import REPORT_PROVIDERS, REPORT_TITLES
 from .services import (
     backup_files,
+    can_rework_document,
     clear_operation_draft,
     create_ppe_issuance,
     create_primary_document,
@@ -101,13 +103,20 @@ from .services import (
     filter_queryset_for_user,
     load_operation_draft,
     low_stock_alerts,
+    mark_all_notifications_read,
+    mark_notification_read,
+    notification_summary,
+    notify_initial_document_status,
     restore_backup_payload,
     restore_backup_file,
     save_operation_draft,
     site_balances,
     transition_document,
+    rework_target_status,
+    update_rework_document,
     warehouse_balances,
     workflow_allowed_statuses,
+    workflow_status_label,
     write_backup_file,
 )
 
@@ -521,6 +530,23 @@ def _export_url(entity_type: str | None, item: Any) -> str:
     return reverse("export-document", kwargs={"entity_type": entity_type, "entity_id": item.pk})
 
 
+def _operation_slug_for_entity(entity_type: str) -> str:
+    for slug, config in OPERATION_CONFIG.items():
+        if config.get("entity_type") == entity_type:
+            return slug
+    return ""
+
+
+def _rework_edit_url(record: DocumentRecord, user) -> str:
+    slug = _operation_slug_for_entity(record.entity_type)
+    if not slug or not can_rework_document(user, record):
+        return ""
+    config = OPERATION_CONFIG[slug]
+    if not getattr(user, "is_superuser", False) and getattr(user, "role", None) in set(config.get("read_only_roles", set())):
+        return ""
+    return f"{reverse('operation-page', kwargs={'slug': slug})}?rework={record.pk}"
+
+
 def _created_export_url(request: HttpRequest, config: dict[str, Any], queryset) -> str:
     entity_type = config.get("entity_type")
     raw_created_id = request.GET.get("created")
@@ -533,6 +559,176 @@ def _created_export_url(request: HttpRequest, config: dict[str, Any], queryset) 
     if not queryset.filter(pk=created_id).exists():
         return ""
     return reverse("export-document", kwargs={"entity_type": entity_type, "entity_id": created_id})
+
+
+def _material_lines_json(lines) -> str:
+    return json.dumps(
+        [
+            {
+                "material_code": line.material.code,
+                "quantity": str(line.quantity),
+                "unit_price": str(line.unit_price),
+                "notes": getattr(line, "notes", "") or "",
+            }
+            for line in lines.select_related("material").all()
+        ],
+        ensure_ascii=False,
+    )
+
+
+def _ppe_lines_json(lines) -> str:
+    return json.dumps(
+        [
+            {
+                "employee_number": line.worker.employee_number,
+                "worker_name": line.worker.full_name,
+                "material_code": line.material.code,
+                "material_name": line.material.name,
+                "quantity": str(line.quantity),
+                "service_life_months": str(line.service_life_months),
+                "clothing_size": line.clothing_size,
+                "shoe_size": line.shoe_size,
+            }
+            for line in lines.select_related("worker", "material").all()
+        ],
+        ensure_ascii=False,
+    )
+
+
+def _operation_initial_from_instance(entity_type: str, instance: Any, user) -> dict[str, Any]:
+    if entity_type == "site_material_request":
+        return {
+            "request_date": instance.request_date,
+            "site_name": instance.site_name,
+            "contract": instance.contract,
+            "status": DocumentStatus.APPROVAL,
+            "notes": instance.notes,
+            "items": _material_lines_json(instance.lines),
+        }
+    if entity_type == "procurement_request":
+        return {
+            "request_date": instance.request_date,
+            "site_request": instance.site_request,
+            "site_name": instance.site_name,
+            "contract": instance.contract,
+            "supplier": instance.supplier,
+            "status": DocumentStatus.APPROVAL,
+            "notes": instance.notes,
+            "items": _material_lines_json(instance.lines),
+        }
+    if entity_type == "supplier_document":
+        return {
+            "supplier": instance.supplier,
+            "request": instance.request,
+            "supply_contract": instance.supply_contract,
+            "doc_type": instance.doc_type,
+            "doc_number": instance.doc_number,
+            "doc_date": instance.doc_date,
+            "amount": instance.amount,
+            "vat_amount": instance.vat_amount,
+            "notes": instance.notes,
+        }
+    if entity_type == "primary_document":
+        return {
+            "document_type": instance.document_type,
+            "doc_date": instance.doc_date,
+            "supplier": instance.supplier,
+            "request": instance.procurement_request,
+            "supply_contract": instance.supply_contract,
+            "stock_receipt": instance.stock_receipt,
+            "status": DocumentStatus.APPROVAL,
+            "amount": instance.amount,
+            "vat_amount": instance.vat_amount,
+            "notes": instance.notes,
+            "items": _material_lines_json(instance.lines),
+        }
+    if entity_type == "stock_receipt":
+        return {
+            "receipt_date": instance.receipt_date,
+            "supplier": instance.supplier,
+            "supplier_document": instance.supplier_document,
+            "primary_document": instance.primary_document,
+            "status": DocumentStatus.APPROVAL,
+            "notes": instance.notes,
+            "items": _material_lines_json(instance.lines),
+        }
+    if entity_type == "stock_issue":
+        return {
+            "issue_date": instance.issue_date,
+            "site_name": instance.site_name,
+            "site_request": instance.site_request,
+            "contract": instance.contract,
+            "stock_receipt": instance.stock_receipt,
+            "received_by_name": instance.received_by_name,
+            "status": DocumentStatus.APPROVAL,
+            "notes": instance.notes,
+            "items": _material_lines_json(instance.lines),
+        }
+    if entity_type == "write_off":
+        return {
+            "act_date": instance.act_date,
+            "contract": instance.contract,
+            "template_variant": instance.template_variant,
+            "site_name": instance.site_name,
+            "work_type": instance.work_type,
+            "work_volume": instance.work_volume,
+            "volume_unit": instance.volume_unit,
+            "status": DocumentStatus.APPROVAL,
+            "notes": instance.notes,
+        }
+    if entity_type == "ppe_issuance":
+        return {
+            "issue_date": instance.issue_date,
+            "site_name": instance.site_name,
+            "season": instance.season,
+            "status": DocumentStatus.APPROVAL,
+            "notes": instance.notes,
+            "items": _ppe_lines_json(instance.lines),
+        }
+    if entity_type == "work_acceptance":
+        return {
+            "act_date": instance.act_date,
+            "contract": instance.contract,
+            "site_name": instance.site_name,
+            "work_description": instance.work_description,
+            "accepted_volume": instance.accepted_volume,
+            "volume_unit": instance.volume_unit,
+            "amount": instance.amount,
+            "status": DocumentStatus.APPROVAL,
+            "notes": instance.notes,
+        }
+    return {}
+
+
+def _rework_record_and_instance(request: HttpRequest, config: dict[str, Any]) -> tuple[DocumentRecord | None, Any | None]:
+    raw_rework_id = request.POST.get("rework_record_id") or request.GET.get("rework")
+    entity_type = config.get("entity_type")
+    if not raw_rework_id or not entity_type:
+        return None, None
+    try:
+        rework_id = int(raw_rework_id)
+    except (TypeError, ValueError):
+        raise Http404("Документ на доработку не найден.")
+
+    record = get_object_or_404(
+        filter_queryset_for_user(request.user, DocumentRecord.objects.select_related("created_by")),
+        pk=rework_id,
+        entity_type=entity_type,
+    )
+    if not can_rework_document(request.user, record):
+        raise PermissionDenied("Для этого документа доработка недоступна.")
+    queryset = filter_queryset_for_user(request.user, config["queryset"]())
+    instance = get_object_or_404(queryset, pk=record.entity_id)
+    return record, instance
+
+
+def _prepare_rework_form(form, *, user, record: DocumentRecord | None) -> None:
+    if record is None or "status" not in form.fields:
+        return
+    target_status = rework_target_status(user, record)
+    form.fields["status"].choices = [(target_status, dict(DocumentStatus.choices)[target_status])]
+    form.fields["status"].initial = target_status
+    form.initial["status"] = target_status
 
 
 def _catalog_rows(
@@ -598,6 +794,7 @@ def _navigation(request: HttpRequest) -> dict[str, Any]:
     role = getattr(getattr(request, "user", None), "role", None)
     catalog_links = []
     operation_links = []
+    notifications = {"notification_count": 0, "notification_items": []}
     if role:
         catalog_links = [
             {"slug": slug, "title": config["title"], "url": reverse("catalog-page", kwargs={"slug": slug})}
@@ -609,9 +806,12 @@ def _navigation(request: HttpRequest) -> dict[str, Any]:
             for slug, config in OPERATION_CONFIG.items()
             if role in config["allowed_roles"]
         ]
+    if getattr(getattr(request, "user", None), "is_authenticated", False):
+        notifications = notification_summary(request.user)
     return {
         "catalog_links": catalog_links,
         "operation_links": operation_links,
+        **notifications,
         "documents_url": reverse("documents"),
         "archive_url": reverse("archive"),
         "reports_url": reverse("reports"),
@@ -707,6 +907,13 @@ def _scope_operation_form_for_supplier(*, request: HttpRequest, config: dict[str
         form.fields["supply_contract"].queryset = filter_queryset_for_user(request.user, contracts_qs)
 
 
+def _operation_form_kwargs(*, request: HttpRequest, config: dict[str, Any], initial: dict[str, Any] | None = None) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"initial": initial or {}}
+    if config.get("entity_type") == "write_off":
+        kwargs["user"] = request.user
+    return kwargs
+
+
 @login_required
 def dashboard(request: HttpRequest) -> HttpResponse:
     recent_documents = filter_queryset_for_user(request.user, DocumentRecord.objects.select_related("created_by").order_by("-doc_date", "-id"))
@@ -791,10 +998,11 @@ def catalog_page(request: HttpRequest, slug: str) -> HttpResponse:
                 saved_object = form.save()
             entity_type = config.get("entity_type")
             if entity_type and getattr(saved_object, "pk", None):
+                notify_initial_document_status(actor=request.user, entity_type=entity_type, entity_id=saved_object.pk)
                 message = (
-                    "Запись обновлена. Word доступен для скачивания."
+                    "Запись обновлена. Файл доступен для скачивания."
                     if instance
-                    else "Запись успешно сохранена. Word доступен для скачивания."
+                    else "Запись успешно сохранена. Файл доступен для скачивания."
                 )
                 messages.success(request, message)
                 return redirect(f"{reverse('catalog-page', kwargs={'slug': slug})}?created={saved_object.pk}")
@@ -838,21 +1046,36 @@ def operation_page(request: HttpRequest, slug: str) -> HttpResponse:
     can_create = _can_create_in_config(request=request, config=config)
     initial = config.get("initial", lambda _request: {})(request)
     draft_payload = {}
-    if request.method == "GET":
+    rework_record, rework_instance = _rework_record_and_instance(request, config)
+    is_rework_edit = rework_record is not None
+    if is_rework_edit and not can_create:
+        raise PermissionDenied("Для вашей роли доработка этого документа через форму недоступна.")
+    if is_rework_edit:
+        initial = {**initial, **_operation_initial_from_instance(config["entity_type"], rework_instance, request.user)}
+    elif request.method == "GET":
         draft_payload = load_operation_draft(user=request.user, operation_slug=slug)
         if draft_payload:
             initial = {**initial, **draft_payload}
-    form = config["form_class"](request.POST or None, request.FILES or None, initial=initial)
+    form = config["form_class"](
+        request.POST or None,
+        request.FILES or None,
+        **_operation_form_kwargs(request=request, config=config, initial=initial),
+    )
     _scope_operation_form_for_supplier(request=request, config=config, form=form)
+    _prepare_rework_form(form, user=request.user, record=rework_record)
     if request.method == "POST" and not can_create:
         raise PermissionDenied("Для вашей роли доступен только просмотр операции.")
     if request.method == "POST" and form.is_valid():
         try:
+            if is_rework_edit:
+                update_rework_document(user=request.user, record=rework_record, cleaned_data=form.cleaned_data, ip_address=_client_ip(request))
+                messages.success(request, "Документ доработан и отправлен повторно по маршруту согласования.")
+                return redirect("documents")
             created_document = config["handler"](user=request.user, cleaned_data=form.cleaned_data, ip_address=_client_ip(request))
             clear_operation_draft(user=request.user, operation_slug=slug)
             entity_type = config.get("entity_type")
             if entity_type and getattr(created_document, "pk", None):
-                messages.success(request, "Документ успешно создан. Word доступен для скачивания.")
+                messages.success(request, "Документ успешно создан. Файл доступен для скачивания.")
                 return redirect(f"{reverse('operation-page', kwargs={'slug': slug})}?created={created_document.pk}")
             else:
                 messages.success(request, "Документ успешно создан.")
@@ -879,6 +1102,10 @@ def operation_page(request: HttpRequest, slug: str) -> HttpResponse:
         "autosave_url": reverse("operation-draft", kwargs={"slug": slug}),
         "draft_loaded": bool(draft_payload),
         "can_create": can_create,
+        "is_rework_edit": is_rework_edit,
+        "rework_record": rework_record,
+        "rework_reason": (rework_record.metadata_json or {}).get("last_rework_reason", "") if rework_record else "",
+        "rework_reason_by": (rework_record.metadata_json or {}).get("last_rework_by", "") if rework_record else "",
         "has_items_field": items_field is not None,
         "items_mode": items_mode,
         "material_catalog": material_catalog,
@@ -900,7 +1127,11 @@ def operation_draft(request: HttpRequest, slug: str) -> JsonResponse:
     if not _can_create_in_config(request=request, config=config):
         return JsonResponse({"ok": False, "detail": "Для вашей роли автосохранение недоступно."}, status=403)
 
-    form = config["form_class"](request.POST or None, request.FILES or None)
+    form = config["form_class"](
+        request.POST or None,
+        request.FILES or None,
+        **_operation_form_kwargs(request=request, config=config),
+    )
     _scope_operation_form_for_supplier(request=request, config=config, form=form)
     payload = _draft_payload_from_form(form)
     draft = save_operation_draft(user=request.user, operation_slug=slug, payload=payload)
@@ -913,6 +1144,130 @@ def operation_draft(request: HttpRequest, slug: str) -> JsonResponse:
     )
 
 
+def _redirect_after_notification_action(request: HttpRequest) -> HttpResponse:
+    target = request.POST.get("next") or request.META.get("HTTP_REFERER") or reverse("dashboard")
+    if not url_has_allowed_host_and_scheme(target, allowed_hosts={request.get_host()}):
+        target = reverse("dashboard")
+    return redirect(target)
+
+
+@login_required
+def notification_read(request: HttpRequest, notification_id: int) -> HttpResponse:
+    if request.method != "POST":
+        raise Http404("Метод не поддерживается.")
+    mark_notification_read(user=request.user, notification_id=notification_id)
+    return _redirect_after_notification_action(request)
+
+
+@login_required
+def notifications_read_all(request: HttpRequest) -> HttpResponse:
+    if request.method != "POST":
+        raise Http404("Метод не поддерживается.")
+    mark_all_notifications_read(user=request.user)
+    return _redirect_after_notification_action(request)
+
+
+def _notification_payload(item: Any, *, documents_url: str) -> dict[str, Any]:
+    created_at = timezone.localtime(item.created_at)
+    return {
+        "id": item.id,
+        "kind": item.kind,
+        "title": item.title,
+        "message": item.message,
+        "entity_type": item.entity_type,
+        "entity_id": item.entity_id,
+        "document_record_id": item.document_record_id,
+        "created_at": created_at.isoformat(),
+        "created_label": created_at.strftime("%d.%m.%Y %H:%M"),
+        "read_url": reverse("notification-read", kwargs={"notification_id": item.id}),
+        "documents_url": documents_url,
+    }
+
+
+@login_required
+def notifications_feed(request: HttpRequest) -> JsonResponse:
+    if request.method != "GET":
+        raise Http404("Метод не поддерживается.")
+    role = getattr(request.user, "role", None)
+    documents_url = reverse("documents") if can_access_documents(role) else ""
+    summary = notification_summary(request.user)
+    return JsonResponse(
+        {
+            "count": summary["notification_count"],
+            "items": [
+                _notification_payload(item, documents_url=documents_url)
+                for item in summary["notification_items"]
+            ],
+        }
+    )
+
+
+def _selected_record_ids(request: HttpRequest) -> list[int]:
+    record_ids: list[int] = []
+    seen: set[int] = set()
+    for raw_id in request.POST.getlist("record_ids"):
+        try:
+            record_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if record_id <= 0 or record_id in seen:
+            continue
+        seen.add(record_id)
+        record_ids.append(record_id)
+    return record_ids
+
+
+def _bulk_send_to_accounting(request: HttpRequest) -> None:
+    record_ids = _selected_record_ids(request)
+    if not record_ids:
+        messages.error(request, "Выберите документы для отправки в бухгалтерию.")
+        return
+
+    scoped_records = filter_queryset_for_user(
+        request.user,
+        DocumentRecord.objects.select_related("created_by").exclude(status=DocumentStatus.ACCEPTED),
+    )
+    records_by_id = {record.id: record for record in scoped_records.filter(pk__in=record_ids)}
+    sent_count = 0
+    skipped: list[str] = []
+
+    for record_id in record_ids:
+        record = records_by_id.get(record_id)
+        if record is None:
+            skipped.append(f"ID {record_id}: документ недоступен")
+            continue
+        allowed_statuses = {value for value, _label in workflow_allowed_statuses(request.user, record)}
+        if DocumentStatus.SENT_ACCOUNTING not in allowed_statuses:
+            skipped.append(f"{record.doc_number}: нет доступного перехода в бухгалтерию")
+            continue
+        try:
+            transition_document(
+                user=request.user,
+                record=record,
+                new_status=DocumentStatus.SENT_ACCOUNTING,
+                ip_address=_client_ip(request),
+            )
+            sent_count += 1
+        except Exception as exc:
+            skipped.append(f"{record.doc_number}: {exc}")
+
+    if sent_count:
+        messages.success(request, f"В бухгалтерию отправлено документов: {sent_count}.")
+    if skipped:
+        details = "; ".join(skipped[:4])
+        if len(skipped) > 4:
+            details = f"{details}; еще {len(skipped) - 4}"
+        messages.warning(request, f"Не отправлены: {len(skipped)}. {details}")
+    elif not sent_count:
+        messages.error(request, "Не удалось отправить выбранные документы.")
+
+
+def _rework_reason_from_post(request: HttpRequest, new_status: str) -> str:
+    if new_status != DocumentStatus.REWORK:
+        return ""
+    return (request.POST.get("rework_reason") or "").strip()
+
+
 @login_required
 def documents(request: HttpRequest) -> HttpResponse:
     _require_roles(request, ROLE_SET_DOCUMENTS)
@@ -921,12 +1276,25 @@ def documents(request: HttpRequest) -> HttpResponse:
     if request.method == "POST":
         if not can_manage_status:
             raise PermissionDenied("Недостаточно прав для изменения статуса.")
+        if request.POST.get("action") == "bulk_send_accounting":
+            _bulk_send_to_accounting(request)
+            return redirect("documents")
         record = get_object_or_404(filter_queryset_for_user(request.user, DocumentRecord.objects.all()), pk=request.POST.get("record_id"))
         new_status = request.POST.get("new_status")
         if new_status not in dict(DocumentStatus.choices):
             raise Http404("Недопустимый статус.")
+        rework_reason = _rework_reason_from_post(request, new_status)
+        if new_status == DocumentStatus.REWORK and not rework_reason:
+            messages.error(request, "Укажите причину возврата документа на доработку.")
+            return redirect("documents")
         try:
-            transition_document(user=request.user, record=record, new_status=new_status, ip_address=_client_ip(request))
+            transition_document(
+                user=request.user,
+                record=record,
+                new_status=new_status,
+                ip_address=_client_ip(request),
+                rework_reason=rework_reason,
+            )
             messages.success(request, f"Статус документа {record.doc_number} обновлен.")
         except Exception as exc:
             messages.error(request, str(exc))
@@ -936,18 +1304,27 @@ def documents(request: HttpRequest) -> HttpResponse:
     filters = form.cleaned_data if form.is_valid() else {}
     records = document_records(filters, user=request.user, active_only=True)
     for record in records:
-        record.available_status_choices = [(record.status, record.get_status_display())]
+        record.display_status = workflow_status_label(record.entity_type, record.status)
+        record.available_status_choices = [(record.status, record.display_status)]
         if can_manage_status:
             allowed_statuses = workflow_allowed_statuses(request.user, record)
             for value, label in allowed_statuses:
                 if value != record.status:
                     record.available_status_choices.append((value, label))
         record.can_update_status = can_manage_status and len(record.available_status_choices) > 1
+        record.can_send_to_accounting = can_manage_status and any(
+            value == DocumentStatus.SENT_ACCOUNTING
+            for value, _label in record.available_status_choices
+        )
+        record.rework_edit_url = _rework_edit_url(record, request.user)
+    can_bulk_send_to_accounting = any(getattr(record, "can_send_to_accounting", False) for record in records)
     context = {
         "title": "Документы в работе",
         "form": form,
         "records": records,
         "can_manage_status": can_manage_status,
+        "can_bulk_send_to_accounting": can_bulk_send_to_accounting,
+        "rework_status": DocumentStatus.REWORK,
         "is_archive": False,
     }
     return _render(request, "core/archive.html", context)
@@ -963,13 +1340,15 @@ def archive(request: HttpRequest) -> HttpResponse:
     filters = form.cleaned_data if form.is_valid() else {}
     records = document_records(filters, user=request.user, archived_only=True)
     for record in records:
-        record.available_status_choices = [(record.status, record.get_status_display())]
+        record.display_status = workflow_status_label(record.entity_type, record.status)
+        record.available_status_choices = [(record.status, record.display_status)]
         record.can_update_status = False
     context = {
         "title": "Архив закрытых документов",
         "form": form,
         "records": records,
         "can_manage_status": False,
+        "rework_status": DocumentStatus.REWORK,
         "is_archive": True,
     }
     return _render(request, "core/archive.html", context)

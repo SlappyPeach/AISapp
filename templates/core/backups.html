@@ -1,8 +1,38 @@
 {% extends "base.html" %}
+{% load static %}
 
 {% block content %}
-<section class="content-grid">
-    <article class="panel">
+<section class="workspace-shell" data-workspace-tabs data-default-workspace="{% if restore_form.errors %}restore-upload{% endif %}">
+    <div class="workspace-switcher" role="list" aria-label="Выбор действия с резервными копиями">
+        <button type="button" class="workspace-choice" data-workspace-trigger="create-backup" aria-controls="workspace-create-backup" aria-pressed="false">
+            <span class="workspace-choice-icon" aria-hidden="true"><svg class="bi"><use href="{% static 'vendor/bootstrap-icons/bootstrap-icons.svg' %}#database"></use></svg></span>
+            <span class="workspace-choice-copy">
+                <strong>Создать резервную копию</strong>
+                <span>Сформировать новую JSON-копию системы</span>
+            </span>
+        </button>
+        <button type="button" class="workspace-choice" data-workspace-trigger="backup-list" aria-controls="workspace-backup-list" aria-pressed="false">
+            <span class="workspace-choice-icon" aria-hidden="true"><svg class="bi"><use href="{% static 'vendor/bootstrap-icons/bootstrap-icons.svg' %}#journal-text"></use></svg></span>
+            <span class="workspace-choice-copy">
+                <strong>Доступные копии</strong>
+                <span>Открыть список сохраненных копий</span>
+            </span>
+        </button>
+        <button type="button" class="workspace-choice" data-workspace-trigger="restore-upload" aria-controls="workspace-restore-upload" aria-pressed="false">
+            <span class="workspace-choice-icon" aria-hidden="true"><svg class="bi"><use href="{% static 'vendor/bootstrap-icons/bootstrap-icons.svg' %}#archive"></use></svg></span>
+            <span class="workspace-choice-copy">
+                <strong>Восстановить из файла</strong>
+                <span>Загрузить внешнюю JSON-копию</span>
+            </span>
+        </button>
+    </div>
+
+    <div class="workspace-empty" data-workspace-empty>
+        Выберите действие с резервными копиями. Откроется только выбранная рабочая область.
+    </div>
+
+    <div class="workspace-panels">
+    <article class="panel workspace-panel" id="workspace-create-backup" data-workspace-panel="create-backup" hidden>
         <div class="panel-head">
             <h3>Создать резервную копию</h3>
         </div>
@@ -14,7 +44,7 @@
         </form>
     </article>
 
-    <article class="panel panel-wide">
+    <article class="panel panel-wide workspace-panel" id="workspace-backup-list" data-workspace-panel="backup-list" hidden>
         <div class="panel-head">
             <h3>Доступные копии</h3>
         </div>
@@ -53,29 +83,30 @@
             </table>
         </div>
     </article>
-</section>
 
-<section class="panel">
-    <div class="panel-head">
-        <h3>Восстановить из файла</h3>
+    <article class="panel workspace-panel" id="workspace-restore-upload" data-workspace-panel="restore-upload" hidden>
+        <div class="panel-head">
+            <h3>Восстановить из файла</h3>
+        </div>
+        <p>Загрузите JSON-файл резервной копии, если нужно вернуть систему к состоянию из внешней копии.</p>
+        <form method="post" enctype="multipart/form-data" class="stack-form">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="restore-upload">
+            {% if restore_form.non_field_errors %}
+                <div class="field-error">{{ restore_form.non_field_errors|join:", " }}</div>
+            {% endif %}
+            {% for field in restore_form %}
+                <div class="field">
+                    <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                    {{ field }}
+                    {% if field.errors %}
+                        <div class="field-error">{{ field.errors|join:", " }}</div>
+                    {% endif %}
+                </div>
+            {% endfor %}
+            <button type="submit" class="secondary-button">Восстановить из файла</button>
+        </form>
+    </article>
     </div>
-    <p>Загрузите JSON-файл резервной копии, если нужно вернуть систему к состоянию из внешней копии.</p>
-    <form method="post" enctype="multipart/form-data" class="stack-form">
-        {% csrf_token %}
-        <input type="hidden" name="action" value="restore-upload">
-        {% if restore_form.non_field_errors %}
-            <div class="field-error">{{ restore_form.non_field_errors|join:", " }}</div>
-        {% endif %}
-        {% for field in restore_form %}
-            <div class="field">
-                <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-                {{ field }}
-                {% if field.errors %}
-                    <div class="field-error">{{ field.errors|join:", " }}</div>
-                {% endif %}
-            </div>
-        {% endfor %}
-        <button type="submit" class="secondary-button">Восстановить из файла</button>
-    </form>
 </section>
 {% endblock %}

@@ -10,6 +10,9 @@ __pycache__/
 legacy/*.db
 
 vendor/
+!static/vendor/
+!static/vendor/bootstrap-icons/
+!static/vendor/bootstrap-icons/*
 
 exports/*
 !exports/.gitkeep

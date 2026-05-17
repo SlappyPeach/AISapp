@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="AISapp">
+  <defs>
+    <linearGradient id="g" x1="12" y1="8" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#1267f1"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#g)"/>
+  <path d="M18 20h28M18 32h22M18 44h28" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round"/>
+  <path d="M48 20v24" fill="none" stroke="#dff7ff" stroke-width="6" stroke-linecap="round"/>
+</svg>

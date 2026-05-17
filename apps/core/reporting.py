@@ -51,6 +51,11 @@ REPORT_CHOICES = [
 ]
 
 STATUS_LABELS = dict(DocumentStatus.choices)
+PPE_ISSUED_STATUSES = {
+    DocumentStatus.SUPPLY_CONFIRMED,
+    DocumentStatus.SENT_ACCOUNTING,
+    DocumentStatus.ACCEPTED,
+}
 MOVEMENT_TYPE_LABELS = {
     "stock_receipt": "Поступление на склад",
     "stock_issue": "Перемещение (требование-накладная)",
@@ -820,7 +825,10 @@ def report_summary_scoped_v2(filters: dict[str, Any], *, user=None) -> list[dict
     grand_total_amount += section_total
 
     # 6. Выданная спецодежда.
-    ppe_qs = PPEIssuanceLine.objects.select_related("issuance", "material").filter(issuance__issue_date__range=(date_from, date_to))
+    ppe_qs = PPEIssuanceLine.objects.select_related("issuance", "material").filter(
+        issuance__issue_date__range=(date_from, date_to),
+        issuance__status__in=PPE_ISSUED_STATUSES,
+    )
     if user_role == RoleChoices.SITE_MANAGER:
         ppe_qs = ppe_qs.filter(issuance__site_name__iexact=site_name) if site_name else ppe_qs.none()
     elif user_role == RoleChoices.ACCOUNTING:
@@ -887,7 +895,8 @@ def report_ppe_scoped(filters: dict[str, Any], *, user=None) -> list[dict[str, A
         date_from, date_to = date_to, date_from
     period = _period_label(date_from, date_to)
     qs = PPEIssuanceLine.objects.select_related("issuance", "worker", "material").filter(
-        issuance__issue_date__range=(date_from, date_to)
+        issuance__issue_date__range=(date_from, date_to),
+        issuance__status__in=PPE_ISSUED_STATUSES,
     )
     user_role = getattr(user, "role", None)
     if user_role == RoleChoices.SITE_MANAGER:

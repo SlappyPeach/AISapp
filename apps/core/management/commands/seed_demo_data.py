@@ -1095,7 +1095,7 @@ class Command(BaseCommand):
                 instance=issuance,
                 target_status=statuses[index],
                 creator=manager,
-                approver=refs["users"][RoleChoices.DIRECTOR],
+                approver=refs["users"][RoleChoices.WAREHOUSE],
                 accounting=refs["users"][RoleChoices.ACCOUNTING],
             )
             issuances.append(issuance)
@@ -1210,6 +1210,10 @@ class Command(BaseCommand):
         approver,
         accounting,
     ) -> None:
+        if entity_type == "ppe_issuance":
+            self._transition_ppe_issuance(instance=instance, target_status=target_status, creator=creator, warehouse=approver, accounting=accounting)
+            return
+
         if target_status == DocumentStatus.DRAFT:
             return
 
@@ -1227,6 +1231,37 @@ class Command(BaseCommand):
             return
 
         record = transition_document(user=approver, record=record, new_status=DocumentStatus.SENT_ACCOUNTING, ip_address="10.0.0.4")
+        if target_status == DocumentStatus.SENT_ACCOUNTING:
+            return
+
+        transition_document(user=accounting, record=record, new_status=DocumentStatus.ACCEPTED, ip_address="10.0.0.5")
+
+    def _transition_ppe_issuance(
+        self,
+        *,
+        instance: PPEIssuance,
+        target_status: str,
+        creator,
+        warehouse,
+        accounting,
+    ) -> None:
+        if target_status == DocumentStatus.DRAFT:
+            return
+
+        record = DocumentRecord.objects.get(entity_type="ppe_issuance", entity_id=instance.id)
+        if record.status == DocumentStatus.DRAFT:
+            record = transition_document(user=creator, record=record, new_status=DocumentStatus.APPROVAL, ip_address="10.0.0.1")
+        if target_status == DocumentStatus.APPROVAL:
+            return
+        if target_status == DocumentStatus.REWORK:
+            transition_document(user=warehouse, record=record, new_status=DocumentStatus.REWORK, ip_address="10.0.0.2")
+            return
+
+        record = transition_document(user=warehouse, record=record, new_status=DocumentStatus.SUPPLY_CONFIRMED, ip_address="10.0.0.3")
+        if target_status == DocumentStatus.SUPPLY_CONFIRMED:
+            return
+
+        record = transition_document(user=warehouse, record=record, new_status=DocumentStatus.SENT_ACCOUNTING, ip_address="10.0.0.4")
         if target_status == DocumentStatus.SENT_ACCOUNTING:
             return
 

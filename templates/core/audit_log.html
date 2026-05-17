@@ -1,56 +1,82 @@
 {% extends "base.html" %}
+{% load static %}
 
 {% block content %}
-<section class="panel">
-    <div class="panel-head">
-        <h3>Фильтры журнала</h3>
+<section class="workspace-shell" data-workspace-tabs data-default-workspace="log">
+    <div class="workspace-switcher" role="list" aria-label="Выбор рабочей области журнала аудита">
+        <button type="button" class="workspace-choice" data-workspace-trigger="filters" aria-controls="workspace-audit-filters" aria-pressed="false">
+            <span class="workspace-choice-icon" aria-hidden="true"><svg class="bi"><use href="{% static 'vendor/bootstrap-icons/bootstrap-icons.svg' %}#funnel"></use></svg></span>
+            <span class="workspace-choice-copy">
+                <strong>Фильтры журнала</strong>
+                <span>Настроить отбор записей по пользователю, действию, сущности и датам</span>
+            </span>
+        </button>
+        <button type="button" class="workspace-choice" data-workspace-trigger="log" aria-controls="workspace-audit-log" aria-pressed="false">
+            <span class="workspace-choice-icon" aria-hidden="true"><svg class="bi"><use href="{% static 'vendor/bootstrap-icons/bootstrap-icons.svg' %}#journal-text"></use></svg></span>
+            <span class="workspace-choice-copy">
+                <strong>Последние действия</strong>
+                <span>Открыть журнал действий на всю рабочую область</span>
+            </span>
+        </button>
     </div>
-    <form method="get" class="filter-grid">
-        {% for field in form %}
-            <div class="field">
-                <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-                {{ field }}
-            </div>
-        {% endfor %}
-        <button type="submit" class="primary-button">Применить</button>
-    </form>
-</section>
 
-<section class="panel">
-    <div class="panel-head">
-        <h3>Последние действия</h3>
+    <div class="workspace-empty" data-workspace-empty>
+        Выберите рабочую область: фильтры журнала или список действий.
     </div>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>Дата и время</th>
-                    <th>Пользователь</th>
-                    <th>Действие</th>
-                    <th>Сущность</th>
-                    <th>Идентификатор</th>
-                    <th>IP-адрес</th>
-                    <th>Детали</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for entry in entries %}
-                    <tr>
-                        <td>{{ entry.created_at|date:"d.m.Y H:i" }}</td>
-                        <td>{% if entry.user %}{{ entry.user.full_name_or_username }}{% else %}Система{% endif %}</td>
-                        <td>{{ entry.action }}</td>
-                        <td>{{ entry.entity_type }}</td>
-                        <td>{{ entry.entity_id|default:"-" }}</td>
-                        <td>{{ entry.ip_address|default:"-" }}</td>
-                        <td>{{ entry.details|default:"-" }}</td>
-                    </tr>
-                {% empty %}
-                    <tr>
-                        <td colspan="7">По выбранным фильтрам записей не найдено.</td>
-                    </tr>
+
+    <div class="workspace-panels">
+        <article class="panel workspace-panel" id="workspace-audit-filters" data-workspace-panel="filters" hidden>
+            <div class="panel-head">
+                <h3>Фильтры журнала</h3>
+            </div>
+            <form method="get" class="filter-grid">
+                {% for field in form %}
+                    <div class="field">
+                        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                        {{ field }}
+                    </div>
                 {% endfor %}
-            </tbody>
-        </table>
+                <button type="submit" class="primary-button">Применить</button>
+            </form>
+        </article>
+
+        <article class="panel panel-wide workspace-panel" id="workspace-audit-log" data-workspace-panel="log" hidden>
+            <div class="panel-head">
+                <h3>Последние действия</h3>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Дата и время</th>
+                            <th>Пользователь</th>
+                            <th>Действие</th>
+                            <th>Сущность</th>
+                            <th>Идентификатор</th>
+                            <th>IP-адрес</th>
+                            <th>Детали</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for entry in entries %}
+                            <tr>
+                                <td>{{ entry.created_at|date:"d.m.Y H:i" }}</td>
+                                <td>{% if entry.user %}{{ entry.user.full_name_or_username }}{% else %}Система{% endif %}</td>
+                                <td>{{ entry.action }}</td>
+                                <td>{{ entry.entity_type }}</td>
+                                <td>{{ entry.entity_id|default:"-" }}</td>
+                                <td>{{ entry.ip_address|default:"-" }}</td>
+                                <td>{{ entry.details|default:"-" }}</td>
+                            </tr>
+                        {% empty %}
+                            <tr>
+                                <td colspan="7">По выбранным фильтрам записей не найдено.</td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </article>
     </div>
 </section>
 {% endblock %}

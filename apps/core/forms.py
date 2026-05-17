@@ -16,12 +16,18 @@ from .models import (
     SiteMaterialRequest,
     SMRContract,
     PrimaryDocument,
+    PPEIssuance,
+    StockIssue,
     StockReceipt,
     Supplier,
     SupplierDocument,
     SupplyContract,
     User,
     Worker,
+    WorkAcceptanceAct,
+    WorkLog,
+    WriteOffAct,
+    WriteOffTemplateVariant,
 )
 from .reporting import REPORT_CHOICES
 from .services import parse_line_items, parse_ppe_lines
@@ -30,8 +36,27 @@ from .services import parse_line_items, parse_ppe_lines
 class DateInput(forms.DateInput):
     input_type = "date"
 
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("format", "%Y-%m-%d")
+        super().__init__(*args, **kwargs)
+
 
 EMPTY_CHOICE_LABEL = "Не выбрано"
+
+
+def _text_choices(values, *, empty_label: str | None = EMPTY_CHOICE_LABEL) -> list[tuple[str, str]]:
+    choices: list[tuple[str, str]] = []
+    if empty_label is not None:
+        choices.append(("", empty_label))
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        key = text.casefold()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        choices.append((text, text))
+    return choices
 
 
 class BaseStyledForm:
@@ -301,8 +326,13 @@ class StockIssueCreateForm(BaseStyledForm, forms.Form):
 class WriteOffCreateForm(BaseStyledForm, forms.Form):
     act_date = forms.DateField(widget=DateInput(), initial=timezone.localdate, label="Дата акта")
     contract = forms.ModelChoiceField(queryset=SMRContract.objects.order_by("-contract_date"), label="Договор СМР")
-    site_name = forms.CharField(max_length=255, label="Участок")
-    work_type = forms.CharField(max_length=255, required=False, label="Вид работ")
+    template_variant = forms.ChoiceField(
+        choices=WriteOffTemplateVariant.choices,
+        initial=WriteOffTemplateVariant.CONTRACT,
+        label="Форма акта",
+    )
+    site_name = forms.ChoiceField(choices=[], label="Участок")
+    work_type = forms.ChoiceField(choices=[], required=False, label="Вид работ")
     work_volume = forms.DecimalField(max_digits=14, decimal_places=3, required=False, label="Объем работ")
     volume_unit = forms.CharField(max_length=64, required=False, label="Единица объема")
     status = forms.ChoiceField(choices=WORKFLOW_ENTRY_STATUS_CHOICES, initial=DocumentStatus.DRAFT, label="Статус")
@@ -312,6 +342,40 @@ class WriteOffCreateForm(BaseStyledForm, forms.Form):
         label="Комментарий",
         help_text="Если вид работ или объем не заполнены, система возьмет их из договора СМР.",
     )
+
+    def __init__(self, *args, user=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["site_name"].choices = self._site_choices(user=user)
+        self.fields["work_type"].choices = self._work_type_choices()
+
+    def _initial_text(self, field_name: str) -> str:
+        return str(self.initial.get(field_name) or "").strip()
+
+    def _site_choices(self, *, user=None) -> list[tuple[str, str]]:
+        initial_site = self._initial_text("site_name")
+        if getattr(user, "role", None) == RoleChoices.SITE_MANAGER:
+            return _text_choices(
+                [getattr(user, "site_name", ""), initial_site],
+                empty_label=None,
+            )
+
+        values: list[str] = [initial_site]
+        values.extend(User.objects.exclude(site_name="").values_list("site_name", flat=True))
+        values.extend(Worker.objects.exclude(site_name="").values_list("site_name", flat=True))
+        values.extend(ConstructionObject.objects.exclude(name="").values_list("name", flat=True))
+        values.extend(SiteMaterialRequest.objects.exclude(site_name="").values_list("site_name", flat=True))
+        values.extend(StockIssue.objects.exclude(site_name="").values_list("site_name", flat=True))
+        values.extend(WriteOffAct.objects.exclude(site_name="").values_list("site_name", flat=True))
+        values.extend(PPEIssuance.objects.exclude(site_name="").values_list("site_name", flat=True))
+        values.extend(WorkAcceptanceAct.objects.exclude(site_name="").values_list("site_name", flat=True))
+        values.extend(WorkLog.objects.exclude(site_name="").values_list("site_name", flat=True))
+        return _text_choices(values)
+
+    def _work_type_choices(self) -> list[tuple[str, str]]:
+        values: list[str] = [self._initial_text("work_type")]
+        values.extend(MaterialNorm.objects.exclude(work_type="").order_by("work_type").values_list("work_type", flat=True))
+        values.extend(SMRContract.objects.exclude(work_type="").order_by("work_type").values_list("work_type", flat=True))
+        return _text_choices(values, empty_label="По договору СМР")
 
 
 class PPEIssuanceCreateForm(BaseStyledForm, forms.Form):

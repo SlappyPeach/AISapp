@@ -24,6 +24,7 @@ from .models import (
     SupplyContract,
     WorkAcceptanceAct,
     WriteOffAct,
+    WriteOffTemplateVariant,
 )
 from .reporting import REPORT_PROVIDERS
 
@@ -55,6 +56,7 @@ DOCX_TEMPLATE_FILES = {
     "stock_receipt": "Приходный ордер_шаблон.docx",
     "stock_issue": "Требование-накладная_шаблон.docx",
     "write_off": "Акт списания материалов по договору_шаблон.docx",
+    "write_off_production_economic": "Акт списания материалов на производственно-хозяйственные нужды_шаблон.docx",
     "work_acceptance": "Акт сдачи-приемки выполненных работ_шаблон.docx",
 }
 
@@ -65,6 +67,11 @@ PRIMARY_DOCUMENT_TEMPLATE_FILES = {
     "goods_waybill": "Товарная накладная ТОРГ-12_шаблон.docx",
     "upd": "Товарная накладная ТОРГ-12_шаблон.docx",
     "receipt_invoice": "Товарная накладная ТОРГ-12_шаблон.docx",
+    "payment_order": "Платежное поручение_шаблон.docx",
+}
+
+PRIMARY_DOCUMENT_XLSX_TEMPLATE_FILES = {
+    "invoice": "Счет на оплату_шаблон.xlsx",
 }
 
 XLSX_TEMPLATE_FILES = {
@@ -328,9 +335,15 @@ class Exporter:
         workbook.close()
         return path
 
-    def _doc_path(self, prefix: str, number: str) -> Path:
+    def _export_path(self, prefix: str, number: str, extension: str) -> Path:
         safe_number = number.replace("/", "_").replace("\\", "_").replace(" ", "_")
-        return settings.EXPORTS_DIR / f"{prefix}_{safe_number}.docx"
+        return settings.EXPORTS_DIR / f"{prefix}_{safe_number}.{extension}"
+
+    def _doc_path(self, prefix: str, number: str) -> Path:
+        return self._export_path(prefix, number, "docx")
+
+    def _xlsx_document_path(self, prefix: str, number: str) -> Path:
+        return self._export_path(prefix, number, "xlsx")
 
     def _prepare_doc(self, title: str, subtitle: str = ""):
         Document, WD_ALIGN_PARAGRAPH, Pt = _load_docx_dependencies()
@@ -428,6 +441,12 @@ class Exporter:
             return supplier.requisites_text()
         return ""
 
+    def _extract_requisite(self, text: str, pattern: str) -> str:
+        if not text:
+            return ""
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        return match.group(1).strip() if match else ""
+
     def _smr_contract_template_context(self, contract: SMRContract) -> dict[str, Any]:
         object_name = contract.object.name if contract.object else ""
         vat_amount = Decimal(contract.amount or 0) * Decimal(contract.vat_rate or 0) / Decimal("100")
@@ -483,39 +502,94 @@ class Exporter:
             total_amount = sum((self._line_amount(line) for line in lines), Decimal("0"))
         vat_amount = Decimal(item.vat_amount or 0)
         supplier_requisites = self._supplier_requisites(item.supplier) or "-"
+        supplier_requisites_raw = "" if supplier_requisites == "-" else supplier_requisites
         buyer_name = self._organization_name() or "-"
+        organization_profile = self._organization_profile()
         buyer_requisites = self._organization_requisites() or "-"
         supplier_inn = item.supplier.tax_id or ""
+        supplier_kpp = self._extract_requisite(supplier_requisites_raw, r"КПП\s*[:№#-]?\s*([0-9]{9})")
+        supplier_account = self._extract_requisite(
+            supplier_requisites_raw,
+            r"(?:р/с|расчетный\s+счет|расч[её]тный\s+счет)\s*[:№#-]?\s*([0-9]{20})",
+        )
+        supplier_corr_account = self._extract_requisite(
+            supplier_requisites_raw,
+            r"(?:к/с|корр\.?\s*счет|корреспондентский\s+счет)\s*[:№#-]?\s*([0-9]{20})",
+        )
+        supplier_bik = self._extract_requisite(supplier_requisites_raw, r"БИК\s*[:№#-]?\s*([0-9]{9})")
+        organization_requisites_raw = self._organization_requisites()
+        payer_account = self._extract_requisite(
+            organization_requisites_raw,
+            r"(?:р/с|расчетный\s+счет|расч[её]тный\s+счет)\s*[:№#-]?\s*([0-9]{20})",
+        )
+        payer_corr_account = self._extract_requisite(
+            organization_requisites_raw,
+            r"(?:к/с|корр\.?\s*счет|корреспондентский\s+счет)\s*[:№#-]?\s*([0-9]{20})",
+        )
+        payer_bik = self._extract_requisite(organization_requisites_raw, r"БИК\s*[:№#-]?\s*([0-9]{9})")
 
         context: dict[str, Any] = {
             **self._template_common_context(),
+            "DOCUMENT_NUMBER": item.number,
+            "DOCUMENT_DATE": self._date_text(item.doc_date),
             "INVOICE_NUMBER": item.number,
             "INVOICE_DATE": self._date_text(item.doc_date),
             "INVOICE_FACTURE_NUMBER": item.number,
             "INVOICE_FACTURE_DATE": self._date_text(item.doc_date),
             "WAYBILL_NUMBER": item.number,
             "WAYBILL_DATE": self._date_text(item.doc_date),
+            "PAYMENT_ORDER_NUMBER": item.number,
+            "PAYMENT_DATE": self._date_text(item.doc_date),
+            "DEBITED_DATE": "",
+            "RECEIVED_BY_BANK_DATE": "",
             "BASIS_DOCUMENT": item.basis_reference or (item.procurement_request.number if item.procurement_request else ""),
             "PAYMENT_DOCUMENT": item.basis_reference or "",
+            "PAYMENT_PURPOSE": item.notes or item.basis_reference or f"Оплата по счету № {item.number}",
+            "PAYMENT_PRIORITY": "5",
+            "PAYMENT_KIND": "электронно",
+            "PAYMENT_CODE": "",
+            "OPERATION_TYPE": "01",
+            "RESERVED_FIELD": "",
             "SUPPLIER_NAME": item.supplier.name,
             "SELLER_NAME": item.supplier.name,
             "SHIPPER_NAME": item.supplier.name,
+            "SHIPPER_NAME_ADDRESS": f"{item.supplier.name}, {item.supplier.address or supplier_requisites_raw}".strip(", "),
             "SUPPLIER_REQUISITES": supplier_requisites,
             "SELLER_ADDRESS": item.supplier.address or supplier_requisites,
+            "SUPPLIER_ADDRESS": item.supplier.address or supplier_requisites_raw,
+            "SUPPLIER_PHONE": item.supplier.phone,
             "SHIPPER_REQUISITES": supplier_requisites,
             "SUPPLIER_INN": supplier_inn,
-            "SUPPLIER_KPP": "",
+            "SUPPLIER_KPP": supplier_kpp,
             "SELLER_INN_KPP": supplier_inn,
             "BUYER_NAME": buyer_name,
             "BUYER_REQUISITES": buyer_requisites,
-            "BUYER_ADDRESS": self._organization_profile().get("address", ""),
-            "BUYER_INN_KPP": self._organization_profile().get("tax_id", ""),
+            "BUYER_ADDRESS": organization_profile.get("address", ""),
+            "BUYER_INN": organization_profile.get("tax_id", ""),
+            "BUYER_KPP": organization_profile.get("kpp", ""),
+            "BUYER_INN_KPP": organization_profile.get("tax_id", ""),
             "CONSIGNEE_NAME": buyer_name,
-            "CONSIGNEE_NAME_ADDRESS": f"{buyer_name}, {self._organization_profile().get('address', '')}".strip(", "),
+            "CONSIGNEE_NAME_ADDRESS": f"{buyer_name}, {organization_profile.get('address', '')}".strip(", "),
             "CONSIGNEE_REQUISITES": buyer_requisites,
             "PAYER_NAME": buyer_name,
+            "PAYER_INN": organization_profile.get("tax_id", ""),
+            "PAYER_KPP": organization_profile.get("kpp", ""),
+            "PAYER_ACCOUNT": payer_account,
+            "PAYER_BANK_NAME": organization_profile.get("bank_details", ""),
+            "PAYER_BANK_BIK": payer_bik,
+            "PAYER_BANK_CORR_ACCOUNT": payer_corr_account,
+            "PAYER_SIGNER_POSITION": "Директор",
             "PAYER_REQUISITES": buyer_requisites,
+            "PAYEE_NAME": item.supplier.name,
+            "PAYEE_INN": supplier_inn,
+            "PAYEE_KPP": supplier_kpp,
+            "PAYEE_ACCOUNT": supplier_account,
+            "PAYEE_BANK_NAME": supplier_requisites_raw,
+            "PAYEE_BANK_BIK": supplier_bik,
+            "PAYEE_BANK_CORR_ACCOUNT": supplier_corr_account,
             "ITEMS_COUNT": len(lines),
+            "AMOUNT": money(total_amount),
+            "AMOUNT_WORDS": f"{money(total_amount)} руб.",
             "TOTAL_AMOUNT": money(total_amount),
             "TOTAL_TO_PAY": money(total_amount),
             "TOTAL_TO_PAY_WORDS": f"{money(total_amount)} руб.",
@@ -532,9 +606,12 @@ class Exporter:
             "PACKS_COUNT": "",
             "WEIGHT": "",
             "COMMENT": item.notes or "",
-            "RECEIVER_BANK": "",
-            "BANK_BIK": "",
-            "BANK_ACCOUNT": "",
+            "RECEIVER_BANK": supplier_requisites_raw,
+            "BANK_BIK": supplier_bik,
+            "BANK_ACCOUNT": supplier_account,
+            "BANK_CORR_ACCOUNT": supplier_corr_account,
+            "DIRECTOR_ORDER": "",
+            "ACCOUNTANT_NAME": "",
         }
 
         def map_line(line, index: int) -> dict[str, Any]:
@@ -655,6 +732,8 @@ class Exporter:
                 "UNIT": line.material.unit,
                 "NORM_QTY": line.calculated_quantity,
                 "ACTUAL_QTY": line.actual_quantity,
+                "QUANTITY": line.actual_quantity,
+                "NOTE": line.notes or act.notes,
                 "WORK_OR_FORM": act.work_type,
             }
 
@@ -662,12 +741,18 @@ class Exporter:
         return context
 
     def _ppe_template_context(self, issuance: PPEIssuance) -> dict[str, Any]:
+        issued_by_name = issuance.issued_by.full_name_or_username if issuance.issued_by_id else ""
+        confirmed_by_name = issuance.confirmed_by.full_name_or_username if issuance.confirmed_by_id else ""
         context: dict[str, Any] = {
             **self._template_common_context(),
             "DOCUMENT_NUMBER": issuance.number,
             "DOCUMENT_DATE": self._date_text(issuance.issue_date),
             "SITE_NAME": issuance.site_name,
             "PPE_CATEGORY": issuance.season or "СИЗ",
+            "SITE_MANAGER_NAME": issued_by_name,
+            "RESPONSIBLE_PERSON_NAME": confirmed_by_name or issued_by_name,
+            "LEFT_SIGNER_NAME": issued_by_name,
+            "RIGHT_SIGNER_NAME": confirmed_by_name,
         }
 
         def map_line(line, index: int) -> dict[str, Any]:
@@ -871,9 +956,16 @@ class Exporter:
             .prefetch_related("lines__material")
             .get(pk=entity_id)
         )
+        context = self._primary_document_template_context(item)
+        xlsx_template_name = PRIMARY_DOCUMENT_XLSX_TEMPLATE_FILES.get(item.document_type.code)
+        if xlsx_template_name:
+            path = self._xlsx_document_path(item.document_type.code, item.number)
+            if self._render_xlsx_template(xlsx_template_name, context, path):
+                return path
+
         path = self._doc_path(item.document_type.code, item.number)
         template_name = PRIMARY_DOCUMENT_TEMPLATE_FILES.get(item.document_type.code)
-        if template_name and self._render_docx_template(template_name, self._primary_document_template_context(item), path):
+        if template_name and self._render_docx_template(template_name, context, path):
             return path
         receiver_name = self._organization_name() or "-"
         receiver_requisites = self._organization_requisites() or "-"
@@ -885,6 +977,7 @@ class Exporter:
             "vat_invoice": "СЧЕТ-ФАКТУРА",
             "goods_waybill": "ТОВАРНАЯ НАКЛАДНАЯ",
             "receipt_invoice": "ПРИХОДНАЯ НАКЛАДНАЯ",
+            "payment_order": "ПЛАТЕЖНОЕ ПОРУЧЕНИЕ",
         }
         doc = self._prepare_doc(title_map.get(item.document_type.code, item.document_type.name.upper()), f"№ {item.number} от {item.doc_date}")
         self._add_meta(
@@ -995,7 +1088,12 @@ class Exporter:
     def _export_writeoff(self, entity_id: int) -> Path:
         act = WriteOffAct.objects.select_related("contract__object").prefetch_related("lines__material").get(pk=entity_id)
         path = self._doc_path("write_off", act.number)
-        if self._render_docx_template(DOCX_TEMPLATE_FILES["write_off"], self._writeoff_template_context(act), path):
+        template_key = (
+            "write_off_production_economic"
+            if act.template_variant == WriteOffTemplateVariant.PRODUCTION_ECONOMIC
+            else "write_off"
+        )
+        if self._render_docx_template(DOCX_TEMPLATE_FILES[template_key], self._writeoff_template_context(act), path):
             return path
         doc = self._prepare_doc("АКТ СПИСАНИЯ МАТЕРИАЛОВ", f"№ {act.number} от {act.act_date}")
         self._add_meta(
@@ -1056,7 +1154,7 @@ class Exporter:
         return path
 
     def _export_ppe_issuance(self, entity_id: int) -> Path:
-        issuance = PPEIssuance.objects.prefetch_related("lines__worker", "lines__material").get(pk=entity_id)
+        issuance = PPEIssuance.objects.select_related("issued_by", "confirmed_by").prefetch_related("lines__worker", "lines__material").get(pk=entity_id)
         path = self._doc_path("ppe_issuance", issuance.number)
         season = (issuance.season or "").casefold()
         if "зим" in season:

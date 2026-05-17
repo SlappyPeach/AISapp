@@ -1,86 +1,190 @@
 {% extends "base.html" %}
+{% load static %}
 
 {% block content %}
-<section class="panel">
-    <div class="panel-head">
-        <h3>{% if is_archive %}Фильтры архива{% else %}Фильтры документов{% endif %}</h3>
+<section class="workspace-shell" data-workspace-tabs data-default-workspace="list">
+    <div class="workspace-switcher" role="list" aria-label="{% if is_archive %}Выбор рабочей области архива{% else %}Выбор рабочей области документов{% endif %}">
+        <button type="button" class="workspace-choice" data-workspace-trigger="filters" aria-controls="workspace-document-filters" aria-pressed="false">
+            <span class="workspace-choice-icon" aria-hidden="true"><svg class="bi"><use href="{% static 'vendor/bootstrap-icons/bootstrap-icons.svg' %}#funnel"></use></svg></span>
+            <span class="workspace-choice-copy">
+                <strong>{% if is_archive %}Фильтры архива{% else %}Фильтры документов{% endif %}</strong>
+                <span>Настроить отбор по типу, статусу, датам, контрагенту или объекту</span>
+            </span>
+        </button>
+        <button type="button" class="workspace-choice" data-workspace-trigger="list" aria-controls="workspace-document-list" aria-pressed="false">
+            <span class="workspace-choice-icon" aria-hidden="true"><svg class="bi"><use href="{% static 'vendor/bootstrap-icons/bootstrap-icons.svg' %}#journal-text"></use></svg></span>
+            <span class="workspace-choice-copy">
+                <strong>{% if is_archive %}Архив документов{% else %}Документы{% endif %}</strong>
+                <span>Открыть таблицу документов на всю рабочую область</span>
+            </span>
+        </button>
     </div>
-    {% if is_archive %}
-        <p class="field-help">В архив попадают только документы со статусом «Принят» и датой не позже текущей.</p>
-    {% else %}
-        <p class="field-help">Здесь находятся документы, которые еще проходят согласование, проверку или передачу в бухгалтерию.</p>
-    {% endif %}
-    <form method="get" class="filter-grid">
-        {% for field in form %}
-            <div class="field">
-                <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-                {{ field }}
+
+    <div class="workspace-empty" data-workspace-empty>
+        Выберите рабочую область: фильтры или список документов.
+    </div>
+
+    <div class="workspace-panels">
+        <article class="panel workspace-panel" id="workspace-document-filters" data-workspace-panel="filters" hidden>
+            <div class="panel-head">
+                <h3>{% if is_archive %}Фильтры архива{% else %}Фильтры документов{% endif %}</h3>
             </div>
-        {% endfor %}
-        <button type="submit" class="primary-button">Применить</button>
-    </form>
+            {% if is_archive %}
+                <p class="field-help">В архив попадают только документы со статусом «Принят» и датой не позже текущей.</p>
+            {% else %}
+                <p class="field-help">Здесь находятся документы, которые еще проходят согласование, проверку или передачу в бухгалтерию.</p>
+            {% endif %}
+            <form method="get" class="filter-grid">
+                {% for field in form %}
+                    <div class="field">
+                        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                        {{ field }}
+                    </div>
+                {% endfor %}
+                <button type="submit" class="primary-button">Применить</button>
+            </form>
+        </article>
+
+        <article class="panel panel-wide workspace-panel" id="workspace-document-list" data-workspace-panel="list" hidden>
+            <div class="panel-head">
+                <div class="panel-title-row">
+                    <h3>{% if is_archive %}Архив документов{% else %}Документы{% endif %}</h3>
+                </div>
+                {% if can_bulk_send_to_accounting %}
+                    <div class="panel-actions">
+                        <form method="post" id="bulk-accounting-form" class="inline-form">
+                            {% csrf_token %}
+                            <input type="hidden" name="action" value="bulk_send_accounting">
+                            <button type="submit" class="primary-button" aria-label="Пакетная отправка в бухгалтерию" title="Пакетная отправка в бухгалтерию">Пакетная отправка</button>
+                        </form>
+                    </div>
+                {% endif %}
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            {% if can_bulk_send_to_accounting %}
+                                <th>
+                                    <input class="checkbox-input" type="checkbox" data-bulk-accounting-toggle aria-label="Выбрать все доступные документы">
+                                </th>
+                            {% endif %}
+                            <th>Тип</th>
+                            <th>Номер</th>
+                            <th>Дата</th>
+                            <th>Контрагент</th>
+                            <th>Объект</th>
+                            <th>Статус</th>
+                            <th>Маршрут</th>
+                            <th>Действия</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for record in records %}
+                            <tr>
+                                {% if can_bulk_send_to_accounting %}
+                                    <td>
+                                        {% if record.can_send_to_accounting %}
+                                            <input class="checkbox-input" type="checkbox" name="record_ids" value="{{ record.id }}" form="bulk-accounting-form" data-bulk-accounting-item aria-label="Выбрать документ {{ record.doc_number }}">
+                                        {% endif %}
+                                    </td>
+                                {% endif %}
+                                <td>{{ record.doc_type }}</td>
+                                <td>{{ record.doc_number }}</td>
+                                <td>{{ record.doc_date }}</td>
+                                <td>{{ record.counterparty }}</td>
+                                <td>{{ record.object_name }}</td>
+                                <td>{{ record.display_status|default:record.get_status_display }}</td>
+                                <td>
+                                    <div class="field-help">
+                                        <div><strong>Создает:</strong> {{ record.metadata_json.workflow_created_by|default:"-" }}</div>
+                                        <div><strong>Согласует:</strong> {{ record.metadata_json.workflow_approved_by|default:"-" }}</div>
+                                        <div><strong>В бухгалтерию:</strong> {{ record.metadata_json.workflow_sent_accounting_by|default:"-" }}</div>
+                                        <div><strong>Только смотрит:</strong> {{ record.metadata_json.workflow_view_only|default:"-" }}</div>
+                                        {% if record.status == rework_status and record.metadata_json.last_rework_reason %}
+                                            <div><strong>Причина доработки:</strong> {{ record.metadata_json.last_rework_reason }}</div>
+                                        {% endif %}
+                                    </div>
+                                </td>
+                                <td>
+                                    <div class="action-row">
+                                        <a class="ghost-button" href="{% url 'export-document' record.entity_type record.entity_id %}">Экспорт</a>
+                                        {% if record.rework_edit_url %}
+                                            <a class="secondary-button" href="{{ record.rework_edit_url }}">Доработать</a>
+                                        {% endif %}
+                                        {% if record.can_update_status %}
+                                            <form method="post" class="inline-form" data-status-form>
+                                                {% csrf_token %}
+                                                <input type="hidden" name="record_id" value="{{ record.id }}">
+                                                <select name="new_status" class="form-input compact-input" data-status-select>
+                                                    {% for value, label in record.available_status_choices %}
+                                                        <option value="{{ value }}" {% if value == record.status %}selected{% endif %}>{{ label }}</option>
+                                                    {% endfor %}
+                                                </select>
+                                                <textarea name="rework_reason" class="form-input compact-input rework-reason-input" rows="2" placeholder="Причина возврата" data-rework-reason hidden></textarea>
+                                                <button type="submit" class="secondary-button">Обновить</button>
+                                            </form>
+                                        {% elif not is_archive %}
+                                            <span class="field-help">Нет доступных переходов</span>
+                                        {% endif %}
+                                    </div>
+                                </td>
+                            </tr>
+                        {% empty %}
+                            <tr><td colspan="{% if can_bulk_send_to_accounting %}9{% else %}8{% endif %}">По выбранным фильтрам ничего не найдено.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </article>
+    </div>
 </section>
 
-<section class="panel">
-    <div class="panel-head">
-        <h3>Документы</h3>
-    </div>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>Тип</th>
-                    <th>Номер</th>
-                    <th>Дата</th>
-                    <th>Контрагент</th>
-                    <th>Объект</th>
-                    <th>Статус</th>
-                    <th>&#1052;&#1072;&#1088;&#1096;&#1088;&#1091;&#1090;</th>
-                    <th>Действия</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for record in records %}
-                    <tr>
-                        <td>{{ record.doc_type }}</td>
-                        <td>{{ record.doc_number }}</td>
-                        <td>{{ record.doc_date }}</td>
-                        <td>{{ record.counterparty }}</td>
-                        <td>{{ record.object_name }}</td>
-                        <td>{{ record.get_status_display }}</td>
-                        <td>
-                            <div class="field-help">
-                                <div><strong>&#1057;&#1086;&#1079;&#1076;&#1072;&#1077;&#1090;:</strong> {{ record.metadata_json.workflow_created_by|default:"-" }}</div>
-                                <div><strong>&#1057;&#1086;&#1075;&#1083;&#1072;&#1089;&#1091;&#1077;&#1090;:</strong> {{ record.metadata_json.workflow_approved_by|default:"-" }}</div>
-                                <div><strong>&#1042; &#1073;&#1091;&#1093;&#1075;&#1072;&#1083;&#1090;&#1077;&#1088;&#1080;&#1102;:</strong> {{ record.metadata_json.workflow_sent_accounting_by|default:"-" }}</div>
-                                <div><strong>&#1058;&#1086;&#1083;&#1100;&#1082;&#1086; &#1089;&#1084;&#1086;&#1090;&#1088;&#1080;&#1090;:</strong> {{ record.metadata_json.workflow_view_only|default:"-" }}</div>
-                            </div>
-                        </td>
-                        <td>
-                            <div class="action-row">
-                                <a class="ghost-button" href="{% url 'export-document' record.entity_type record.entity_id %}">Экспорт</a>
-                                {% if record.can_update_status %}
-                                    <form method="post" class="inline-form">
-                                        {% csrf_token %}
-                                        <input type="hidden" name="record_id" value="{{ record.id }}">
-                                        <select name="new_status" class="form-input compact-input">
-                                            {% for value, label in record.available_status_choices %}
-                                                <option value="{{ value }}" {% if value == record.status %}selected{% endif %}>{{ label }}</option>
-                                            {% endfor %}
-                                        </select>
-                                        <button type="submit" class="secondary-button">Обновить</button>
-                                    </form>
-                                {% elif not is_archive %}
-                                    <span class="field-help">Нет доступных переходов</span>
-                                {% endif %}
-                            </div>
-                        </td>
-                    </tr>
-                {% empty %}
-                    <tr><td colspan="8">По выбранным фильтрам ничего не найдено.</td></tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
-</section>
+{% if can_manage_status and not is_archive %}
+<script>
+(() => {
+    document.querySelectorAll("[data-status-form]").forEach((form) => {
+        const select = form.querySelector("[data-status-select]");
+        const reason = form.querySelector("[data-rework-reason]");
+        if (!select || !reason) return;
+
+        const syncReason = () => {
+            const needsReason = select.value === "{{ rework_status }}";
+            reason.hidden = !needsReason;
+            reason.required = needsReason;
+            if (!needsReason) {
+                reason.value = "";
+            }
+        };
+
+        select.addEventListener("change", syncReason);
+        syncReason();
+    });
+})();
+</script>
+{% endif %}
+{% if can_bulk_send_to_accounting %}
+<script>
+(() => {
+    const toggle = document.querySelector("[data-bulk-accounting-toggle]");
+    const items = Array.from(document.querySelectorAll("[data-bulk-accounting-item]"));
+    if (!toggle || !items.length) return;
+
+    const syncToggle = () => {
+        const checkedCount = items.filter((item) => item.checked).length;
+        toggle.checked = checkedCount === items.length;
+        toggle.indeterminate = checkedCount > 0 && checkedCount < items.length;
+    };
+
+    toggle.addEventListener("change", () => {
+        items.forEach((item) => {
+            item.checked = toggle.checked;
+        });
+        syncToggle();
+    });
+    items.forEach((item) => item.addEventListener("change", syncToggle));
+    syncToggle();
+})();
+</script>
+{% endif %}
 {% endblock %}

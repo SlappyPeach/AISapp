@@ -205,17 +205,24 @@ REST API опубликован под префиксом `/api/`.
 
 ## 5. Технологический стек
 
-- `Python 3.12`
-- `Django 6`
-- `Django REST Framework`
-- `PostgreSQL 15`
-- `Celery 5.5`
-- `Redis 7`
-- `python-docx`
-- `XlsxWriter`
-- серверный UI на `Django Templates`
+Единый production baseline для текущей реализации:
 
-Файл зависимостей: `requirements.txt`
+| Компонент | Версия / диапазон | Где зафиксировано |
+| --- | --- | --- |
+| Python | `3.12.x` | `Dockerfile`, требования к окружению |
+| Django | `6.0.x` | `requirements.txt` |
+| Django REST Framework | `3.16.x` | `requirements.txt` |
+| PostgreSQL | `15.x` | `docker-compose.yml`, требования к окружению |
+| Celery | `5.5.x` | `requirements.txt` |
+| Redis server | `7.x` | `docker-compose.yml` |
+| Redis Python client | `6.0.x` | `requirements.txt` |
+| psycopg | `3.2.x`-`3.3.x` | `requirements.txt` |
+| DOCX/XLSX export | `python-docx 1.2.x`, `XlsxWriter 3.2.x` | `requirements.txt` |
+| UI | `Django Templates` | кодовая база |
+
+Файл зависимостей: `requirements.txt`.
+
+Версии `Python 3.13` и `PostgreSQL 18`, которые встречались в черновых документах, не являются production baseline для `AISapp`. Их можно использовать только как совместимый локальный эксперимент после отдельного regression-прогона.
 
 ## 6. Структура проекта
 
@@ -231,11 +238,11 @@ REST API опубликован под префиксом `/api/`.
 
 ## 7. Требования к окружению
 
-Минимально для локального запуска:
+Минимально для локального запуска и production-развертывания:
 
 - `Windows 10/11` или совместимая среда с Python;
-- `Python 3.13`;
-- `PostgreSQL 18`;
+- `Python 3.12.x`;
+- `PostgreSQL 15.x`;
 - доступ пользователя PostgreSQL к БД `postgres` и право создания новой БД, если вы хотите использовать авто-создание `ais_db`.
 
 Опционально:
@@ -442,6 +449,9 @@ docker compose up --build
 
 Параметры из `docker-compose.yml`:
 
+- web/celery собираются из `python:3.12-slim`;
+- PostgreSQL использует образ `postgres:15`;
+- Redis использует образ `redis:7`;
 - PostgreSQL контейнера публикуется как `5433 -> 5432`;
 - веб-приложение публикуется на `8010`;
 - Redis публикуется на `6379`.
@@ -665,6 +675,7 @@ python manage.py restore_backup ".\backups\demo_seed_DEMO_20260421_183130.json"
 
 Если требуется полноценная production-эксплуатация, следующим шагом обычно становятся:
 
+- удержание production baseline: `Python 3.12.x`, `PostgreSQL 15.x`, `Redis 7.x`;
 - настройка внешнего reverse proxy;
 - вынесение секретов и параметров окружения в защищенное хранилище;
 - настройка постоянных томов для `backups`, `exports`, `uploads`, `media`;

@@ -14,7 +14,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from .exports import Exporter
-from .forms import MaterialForm, ProcurementRequestCreateForm, SupplierForm, UserForm
+from .forms import MaterialForm, ProcurementRequestCreateForm, SupplierForm, UserForm, WriteOffCreateForm
 from .models import (
     AuditLog,
     DocumentRecord,
@@ -22,6 +22,8 @@ from .models import (
     DocumentType,
     Material,
     MaterialNorm,
+    Notification,
+    NotificationType,
     PPEIssuance,
     PPEIssuanceLine,
     PrimaryDocument,
@@ -39,6 +41,7 @@ from .models import (
     WorkAcceptanceAct,
     WorkLog,
     WriteOffAct,
+    WriteOffTemplateVariant,
 )
 from .reporting import report_ppe_scoped
 from .services import (
@@ -141,6 +144,96 @@ class WorkflowTests(TestCase):
                 },
             )
 
+    def test_site_material_request_on_approval_notifies_warehouse(self) -> None:
+        request = create_site_material_request(
+            user=self.user,
+            cleaned_data={
+                "request_date": timezone.localdate(),
+                "site_name": "Участок 12",
+                "contract": self.contract,
+                "status": DocumentStatus.APPROVAL,
+                "notes": "Нужно выдать",
+                "items": material_items(quantity="2", unit_price="100", notes="Уведомление"),
+            },
+        )
+
+        self.assertTrue(
+            Notification.objects.filter(
+                user=self.warehouse,
+                kind=NotificationType.ACTION_REQUIRED,
+                entity_type="site_material_request",
+                entity_id=request.id,
+                is_read=False,
+            ).exists()
+        )
+
+    def test_rework_status_notifies_document_creator(self) -> None:
+        request = create_procurement_request(
+            user=self.user,
+            cleaned_data={
+                "request_date": timezone.localdate(),
+                "site_name": "Участок 12",
+                "contract": self.contract,
+                "supplier": self.supplier,
+                "status": DocumentStatus.APPROVAL,
+                "notes": "Вернуть на доработку",
+                "items": material_items(quantity="10", unit_price="100", notes="Доработка"),
+            },
+        )
+        Notification.objects.all().delete()
+        record = DocumentRecord.objects.get(entity_type="procurement_request", entity_id=request.id)
+
+        transition_document(user=self.director, record=record, new_status=DocumentStatus.REWORK)
+
+        self.assertTrue(
+            Notification.objects.filter(
+                user=self.user,
+                kind=NotificationType.ACTION_REQUIRED,
+                entity_type="procurement_request",
+                entity_id=request.id,
+                is_read=False,
+            ).exists()
+        )
+
+    def test_low_stock_notification_is_created_after_stock_issue(self) -> None:
+        receipt = create_stock_receipt(
+            user=self.warehouse,
+            cleaned_data={
+                "receipt_date": timezone.localdate(),
+                "supplier": self.supplier,
+                "supplier_document": None,
+                "primary_document": None,
+                "status": DocumentStatus.DRAFT,
+                "notes": "Запас",
+                "items": material_items(quantity="6", unit_price="100", notes="Склад"),
+            },
+        )
+
+        create_stock_issue(
+            user=self.warehouse,
+            cleaned_data={
+                "issue_date": timezone.localdate(),
+                "site_name": "Участок 12",
+                "site_request": None,
+                "contract": self.contract,
+                "stock_receipt": receipt,
+                "received_by_name": "Получатель",
+                "status": DocumentStatus.DRAFT,
+                "notes": "До минимума",
+                "items": material_items(quantity="1", unit_price="100", notes="Выдача"),
+            },
+        )
+
+        self.assertTrue(
+            Notification.objects.filter(
+                user=self.warehouse,
+                kind=NotificationType.LOW_STOCK,
+                entity_type="material",
+                entity_id=self.material.id,
+                is_read=False,
+            ).exists()
+        )
+
     def test_document_record_stores_workflow_route_metadata(self) -> None:
         request = create_procurement_request(
             user=self.user,
@@ -207,6 +300,120 @@ class WorkflowTests(TestCase):
         self.assertIn(self.user.site_name, workbook_xml)
         self.assertIn(self.material.code, workbook_xml)
         self.assertNotIn("{{", workbook_xml)
+
+    def test_invoice_export_uses_xlsx_template(self) -> None:
+        if not (settings.DOCUMENT_TEMPLATES_DIR / "Счет на оплату_шаблон.xlsx").exists():
+            self.skipTest("Invoice XLSX template is not available.")
+
+        document = create_primary_document(
+            user=self.user,
+            cleaned_data={
+                "document_type": self.invoice_type,
+                "doc_date": timezone.localdate(),
+                "supplier": self.supplier,
+                "request": None,
+                "supply_contract": None,
+                "stock_receipt": None,
+                "site_name": self.user.site_name,
+                "amount": Decimal("200"),
+                "vat_amount": Decimal("40"),
+                "status": DocumentStatus.DRAFT,
+                "notes": "Оплата материалов",
+                "items": material_items(quantity="2", unit_price="100", notes="Экспорт"),
+            },
+        )
+
+        path = Exporter().export_document("primary_document", document.id)
+
+        self.assertEqual(path.suffix, ".xlsx")
+        with ZipFile(path) as archive:
+            workbook_xml = "\n".join(
+                archive.read(name).decode("utf-8")
+                for name in archive.namelist()
+                if name.endswith(".xml")
+            )
+        self.assertIn(document.number, workbook_xml)
+        self.assertIn(self.material.name, workbook_xml)
+        self.assertNotIn("{{", workbook_xml)
+
+    def test_payment_order_export_uses_docx_template(self) -> None:
+        if not (settings.DOCUMENT_TEMPLATES_DIR / "Платежное поручение_шаблон.docx").exists():
+            self.skipTest("Payment order DOCX template is not available.")
+
+        payment_type, _created = DocumentType.objects.get_or_create(
+            code="payment_order",
+            defaults={
+                "name": "Платежное поручение",
+                "prefix": "PAY",
+                "available_for_generation": True,
+                "available_for_upload": False,
+                "requires_items": False,
+            },
+        )
+        document = create_primary_document(
+            user=self.user,
+            cleaned_data={
+                "document_type": payment_type,
+                "doc_date": timezone.localdate(),
+                "supplier": self.supplier,
+                "request": None,
+                "supply_contract": None,
+                "stock_receipt": None,
+                "site_name": self.user.site_name,
+                "amount": Decimal("1200"),
+                "vat_amount": Decimal("0"),
+                "status": DocumentStatus.DRAFT,
+                "notes": "Оплата по счету",
+                "items": "",
+            },
+        )
+
+        path = Exporter().export_document("primary_document", document.id)
+
+        self.assertEqual(path.suffix, ".docx")
+        with ZipFile(path) as archive:
+            document_xml = archive.read("word/document.xml").decode("utf-8")
+        self.assertIn(document.number, document_xml)
+        self.assertIn(self.supplier.name, document_xml)
+        self.assertNotIn("{{", document_xml)
+
+    def test_writeoff_can_use_production_economic_template(self) -> None:
+        if not (settings.DOCUMENT_TEMPLATES_DIR / "Акт списания материалов на производственно-хозяйственные нужды_шаблон.docx").exists():
+            self.skipTest("Production-economic write-off template is not available.")
+
+        StockMovement.objects.create(
+            movement_date=timezone.localdate(),
+            material=self.material,
+            quantity_delta=Decimal("20"),
+            location_name="Участок 12",
+            source_type="seed",
+            source_id=9,
+            unit_price=Decimal("100"),
+            created_by=self.user,
+        )
+        act = create_writeoff(
+            user=self.user,
+            cleaned_data={
+                "act_date": timezone.localdate(),
+                "contract": self.contract,
+                "template_variant": WriteOffTemplateVariant.PRODUCTION_ECONOMIC,
+                "site_name": "Участок 12",
+                "work_type": "Прокладка кабеля",
+                "work_volume": Decimal("3"),
+                "volume_unit": "этап",
+                "status": DocumentStatus.DRAFT,
+                "notes": "Производственно-хозяйственные нужды",
+            },
+        )
+
+        path = Exporter().export_document("write_off", act.id)
+
+        with ZipFile(path) as archive:
+            document_xml = archive.read("word/document.xml").decode("utf-8")
+        self.assertIn(act.number, document_xml)
+        self.assertIn(self.material.code, document_xml)
+        self.assertNotIn(self.contract.number, document_xml)
+        self.assertNotIn("{{", document_xml)
 
     def test_supply_contract_workflow_entry_is_limited_to_director_or_admin(self) -> None:
         supply_contract = SupplyContract.objects.create(
@@ -363,6 +570,36 @@ class WorkflowTests(TestCase):
         )
         self.assertEqual(act.work_type, self.contract.work_type)
         self.assertEqual(act.work_volume, Decimal("2"))
+
+    def test_writeoff_form_uses_dropdowns_for_site_and_work_type(self) -> None:
+        form = WriteOffCreateForm(user=self.user, initial={"site_name": self.user.site_name})
+
+        self.assertEqual(form.fields["site_name"].widget.input_type, "select")
+        self.assertEqual(form.fields["work_type"].widget.input_type, "select")
+        self.assertIn((self.user.site_name, self.user.site_name), list(form.fields["site_name"].choices))
+        self.assertIn(("Прокладка кабеля", "Прокладка кабеля"), list(form.fields["work_type"].choices))
+        self.assertIn(("", "По договору СМР"), list(form.fields["work_type"].choices))
+
+    def test_writeoff_form_rejects_values_outside_dropdowns(self) -> None:
+        form = WriteOffCreateForm(
+            data={
+                "act_date": timezone.localdate().isoformat(),
+                "contract": str(self.contract.id),
+                "template_variant": WriteOffTemplateVariant.CONTRACT,
+                "site_name": "Чужой участок",
+                "work_type": "Несуществующий вид работ",
+                "work_volume": "1",
+                "volume_unit": "этап",
+                "status": DocumentStatus.DRAFT,
+                "notes": "",
+            },
+            user=self.user,
+            initial={"site_name": self.user.site_name},
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("site_name", form.errors)
+        self.assertIn("work_type", form.errors)
 
     def test_writeoff_rejects_negative_site_balance(self) -> None:
         StockMovement.objects.create(
@@ -558,6 +795,110 @@ class WorkflowTests(TestCase):
         self.assertEqual(line.material, ppe)
         self.assertEqual(line.clothing_size, "52")
         self.assertEqual(line.shoe_size, "42")
+        self.assertFalse(StockMovement.objects.filter(source_type="ppe_issuance", source_id=issuance.id).exists())
+
+    def test_ppe_issuance_is_written_off_only_after_warehouse_confirmation(self) -> None:
+        worker = Worker.objects.create(full_name="Петр Сидоров", employee_number="EMP-778", site_name=self.user.site_name)
+        ppe = Material.objects.create(code="PPE-778", name="Каска", unit="шт", price=300, min_stock=0, is_ppe=True)
+        StockMovement.objects.create(
+            movement_date=timezone.localdate(),
+            material=ppe,
+            quantity_delta=Decimal("3"),
+            location_name=settings.WAREHOUSE_NAME,
+            source_type="seed",
+            source_id=6,
+            unit_price=Decimal("300"),
+            created_by=self.warehouse,
+        )
+        issuance = create_ppe_issuance(
+            user=self.user,
+            cleaned_data={
+                "issue_date": timezone.localdate(),
+                "site_name": self.user.site_name,
+                "season": "летняя",
+                "status": DocumentStatus.APPROVAL,
+                "notes": "",
+                "items": '[{"employee_number":"EMP-778","material_code":"PPE-778","quantity":"2","service_life_months":"12"}]',
+            },
+        )
+        record = DocumentRecord.objects.get(entity_type="ppe_issuance", entity_id=issuance.id)
+        warehouse_statuses = dict(workflow_allowed_statuses(self.warehouse, record))
+
+        self.assertIn(DocumentStatus.SUPPLY_CONFIRMED, warehouse_statuses)
+        self.assertEqual(warehouse_statuses[DocumentStatus.SUPPLY_CONFIRMED], "Выдача подтверждена")
+        self.assertFalse(StockMovement.objects.filter(source_type="ppe_issuance", source_id=issuance.id).exists())
+
+        transition_document(user=self.warehouse, record=record, new_status=DocumentStatus.SUPPLY_CONFIRMED)
+
+        issuance.refresh_from_db()
+        movement = StockMovement.objects.get(source_type="ppe_issuance", source_id=issuance.id)
+        self.assertEqual(issuance.status, DocumentStatus.SUPPLY_CONFIRMED)
+        self.assertEqual(issuance.confirmed_by, self.warehouse)
+        self.assertIsNotNone(issuance.confirmed_at)
+        self.assertEqual(movement.material, ppe)
+        self.assertEqual(movement.quantity_delta, Decimal("-2.000"))
+        self.assertEqual(movement.created_by, self.warehouse)
+
+    def test_ppe_confirmation_rejects_insufficient_warehouse_stock(self) -> None:
+        Worker.objects.create(full_name="Сергей Иванов", employee_number="EMP-779", site_name=self.user.site_name)
+        Material.objects.create(code="PPE-779", name="Очки защитные", unit="шт", price=120, min_stock=0, is_ppe=True)
+        issuance = create_ppe_issuance(
+            user=self.user,
+            cleaned_data={
+                "issue_date": timezone.localdate(),
+                "site_name": self.user.site_name,
+                "season": "летняя",
+                "status": DocumentStatus.APPROVAL,
+                "notes": "",
+                "items": '[{"employee_number":"EMP-779","material_code":"PPE-779","quantity":"1","service_life_months":"12"}]',
+            },
+        )
+        record = DocumentRecord.objects.get(entity_type="ppe_issuance", entity_id=issuance.id)
+
+        with self.assertRaisesMessage(ValueError, "Недостаточно остатка"):
+            transition_document(user=self.warehouse, record=record, new_status=DocumentStatus.SUPPLY_CONFIRMED)
+
+        issuance.refresh_from_db()
+        record.refresh_from_db()
+        self.assertEqual(issuance.status, DocumentStatus.APPROVAL)
+        self.assertEqual(record.status, DocumentStatus.APPROVAL)
+        self.assertIsNone(issuance.confirmed_by)
+        self.assertFalse(StockMovement.objects.filter(source_type="ppe_issuance", source_id=issuance.id).exists())
+
+    def test_ppe_rework_clears_warehouse_confirmation_and_stock_movement(self) -> None:
+        Worker.objects.create(full_name="Анна Петрова", employee_number="EMP-780", site_name=self.user.site_name)
+        ppe = Material.objects.create(code="PPE-780", name="Перчатки", unit="пар", price=80, min_stock=0, is_ppe=True)
+        StockMovement.objects.create(
+            movement_date=timezone.localdate(),
+            material=ppe,
+            quantity_delta=Decimal("5"),
+            location_name=settings.WAREHOUSE_NAME,
+            source_type="seed",
+            source_id=7,
+            unit_price=Decimal("80"),
+            created_by=self.warehouse,
+        )
+        issuance = create_ppe_issuance(
+            user=self.user,
+            cleaned_data={
+                "issue_date": timezone.localdate(),
+                "site_name": self.user.site_name,
+                "season": "летняя",
+                "status": DocumentStatus.APPROVAL,
+                "notes": "",
+                "items": '[{"employee_number":"EMP-780","material_code":"PPE-780","quantity":"1","service_life_months":"6"}]',
+            },
+        )
+        record = DocumentRecord.objects.get(entity_type="ppe_issuance", entity_id=issuance.id)
+        confirmed_record = transition_document(user=self.warehouse, record=record, new_status=DocumentStatus.SUPPLY_CONFIRMED)
+
+        transition_document(user=self.warehouse, record=confirmed_record, new_status=DocumentStatus.REWORK)
+
+        issuance.refresh_from_db()
+        self.assertEqual(issuance.status, DocumentStatus.REWORK)
+        self.assertIsNone(issuance.confirmed_by)
+        self.assertIsNone(issuance.confirmed_at)
+        self.assertFalse(StockMovement.objects.filter(source_type="ppe_issuance", source_id=issuance.id).exists())
 
     def test_supplier_cannot_upload_document_for_another_supplier(self) -> None:
         supplier_user = User.objects.create_user(username="supplier-guard", password="supplier123", role="supplier", supplier=self.supplier)
@@ -641,7 +982,69 @@ class ViewSmokeTests(TestCase):
         response = self.client.get(reverse("dashboard"))
         self.assertEqual(response.status_code, 200)
 
-    def test_operation_creation_shows_immediate_word_download(self) -> None:
+    def test_writeoff_operation_renders_dropdown_fields(self) -> None:
+        self.client.login(username="site", password="site123")
+
+        response = self.client.get(reverse("operation-page", kwargs={"slug": "writeoffs"}))
+
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode("utf-8")
+        self.assertIn('<select name="site_name"', html)
+        self.assertIn('<select name="work_type"', html)
+
+    def test_notification_can_be_marked_as_read(self) -> None:
+        notification = Notification.objects.create(
+            user=self.user,
+            kind=NotificationType.ACTION_REQUIRED,
+            title="Проверить документ",
+            message="Тестовое уведомление",
+        )
+        self.client.login(username="admin", password="admin123")
+
+        response = self.client.post(reverse("notification-read", kwargs={"notification_id": notification.id}), {"next": reverse("dashboard")})
+
+        notification.refresh_from_db()
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(notification.is_read)
+        self.assertIsNotNone(notification.read_at)
+
+    def test_notification_feed_returns_current_unread_notifications(self) -> None:
+        visible_notification = Notification.objects.create(
+            user=self.user,
+            kind=NotificationType.ACTION_REQUIRED,
+            title="Проверить документ",
+            message="Статус изменен",
+        )
+        Notification.objects.create(
+            user=self.user,
+            kind=NotificationType.STATUS_CHANGED,
+            title="Старое уведомление",
+            is_read=True,
+        )
+        Notification.objects.create(
+            user=self.director,
+            kind=NotificationType.ACTION_REQUIRED,
+            title="Чужое уведомление",
+        )
+        self.client.login(username="admin", password="admin123")
+
+        response = self.client.get(reverse("notifications-feed"))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(len(payload["items"]), 1)
+        item = payload["items"][0]
+        self.assertEqual(item["id"], visible_notification.id)
+        self.assertEqual(item["title"], "Проверить документ")
+        self.assertEqual(item["message"], "Статус изменен")
+        self.assertEqual(
+            item["read_url"],
+            reverse("notification-read", kwargs={"notification_id": visible_notification.id}),
+        )
+        self.assertEqual(item["documents_url"], reverse("documents"))
+
+    def test_operation_creation_shows_immediate_file_download(self) -> None:
         self.client.login(username="site", password="site123")
 
         response = self.client.post(
@@ -651,18 +1054,59 @@ class ViewSmokeTests(TestCase):
                 "site_name": self.site_manager.site_name,
                 "contract": self.contract.id,
                 "status": DocumentStatus.DRAFT,
-                "notes": "Сразу скачать Word",
-                "items": material_items(quantity="2", unit_price="100", notes="word"),
+                "notes": "Сразу скачать файл",
+                "items": material_items(quantity="2", unit_price="100", notes="export"),
             },
             follow=True,
         )
 
-        request = SiteMaterialRequest.objects.get(notes="Сразу скачать Word")
+        request = SiteMaterialRequest.objects.get(notes="Сразу скачать файл")
         export_url = reverse("export-document", kwargs={"entity_type": "site_material_request", "entity_id": request.id})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context["created_export_url"], export_url)
-        self.assertContains(response, "Word готов")
+        self.assertContains(response, "Файл готов")
         self.assertContains(response, export_url)
+
+    def test_rework_document_can_be_edited_and_resubmitted(self) -> None:
+        site_request = create_site_material_request(
+            user=self.site_manager,
+            cleaned_data={
+                "request_date": timezone.localdate(),
+                "site_name": self.site_manager.site_name,
+                "contract": self.contract,
+                "status": DocumentStatus.APPROVAL,
+                "notes": "Нужна правка",
+                "items": material_items(quantity="2", unit_price="100", notes="old"),
+            },
+        )
+        record = DocumentRecord.objects.get(entity_type="site_material_request", entity_id=site_request.id)
+        transition_document(user=self.user, record=record, new_status=DocumentStatus.REWORK)
+
+        self.client.login(username="site", password="site123")
+        documents_response = self.client.get(reverse("documents"))
+        returned_record = next(item for item in documents_response.context["records"] if item.entity_id == site_request.id)
+        self.assertIn("rework=", returned_record.rework_edit_url)
+        self.assertContains(documents_response, "Доработать")
+
+        post_response = self.client.post(
+            returned_record.rework_edit_url,
+            {
+                "request_date": timezone.localdate().isoformat(),
+                "site_name": self.site_manager.site_name,
+                "contract": self.contract.id,
+                "status": DocumentStatus.APPROVAL,
+                "notes": "Исправлено",
+                "items": material_items(quantity="4", unit_price="100", notes="new"),
+            },
+        )
+
+        site_request.refresh_from_db()
+        record.refresh_from_db()
+        self.assertEqual(post_response.status_code, 302)
+        self.assertEqual(site_request.status, DocumentStatus.APPROVAL)
+        self.assertEqual(record.status, DocumentStatus.APPROVAL)
+        self.assertEqual(site_request.notes, "Исправлено")
+        self.assertEqual(site_request.lines.get().quantity, Decimal("4.000"))
 
     def test_documents_and_archive_are_separate_sections(self) -> None:
         active_record = DocumentRecord.objects.create(
@@ -1207,6 +1651,125 @@ class ViewSmokeTests(TestCase):
         draft_record = DocumentRecord.objects.get(entity_type="procurement_request", entity_id=draft_request.id)
         self.assertNotEqual(draft_record.id, approved_record.id)
 
+    def test_rework_status_requires_and_stores_reason(self) -> None:
+        request = create_site_material_request(
+            user=self.site_manager,
+            cleaned_data={
+                "request_date": timezone.localdate(),
+                "site_name": "Участок 12",
+                "contract": self.contract,
+                "status": DocumentStatus.APPROVAL,
+                "notes": "Вернуть с причиной",
+                "items": material_items(quantity="1", unit_price="100", notes="reason"),
+            },
+        )
+        record = DocumentRecord.objects.get(entity_type="site_material_request", entity_id=request.id)
+        self.client.login(username="admin", password="admin123")
+
+        missing_reason_response = self.client.post(
+            reverse("documents"),
+            {"record_id": record.id, "new_status": DocumentStatus.REWORK},
+        )
+        request.refresh_from_db()
+        self.assertEqual(missing_reason_response.status_code, 302)
+        self.assertEqual(request.status, DocumentStatus.APPROVAL)
+
+        reason = "Не приложено коммерческое предложение"
+        response = self.client.post(
+            reverse("documents"),
+            {
+                "record_id": record.id,
+                "new_status": DocumentStatus.REWORK,
+                "rework_reason": reason,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        request.refresh_from_db()
+        self.assertEqual(request.status, DocumentStatus.REWORK)
+        record.refresh_from_db()
+        self.assertEqual(record.metadata_json["last_rework_reason"], reason)
+        self.assertTrue(AuditLog.objects.filter(entity_type="site_material_request", details__icontains=reason).exists())
+        self.assertTrue(
+            Notification.objects.filter(
+                user=self.site_manager,
+                entity_type="site_material_request",
+                entity_id=request.id,
+                message__icontains=reason,
+            ).exists()
+        )
+
+        self.client.login(username="site", password="site123")
+        documents_response = self.client.get(reverse("documents"))
+        self.assertContains(documents_response, reason)
+        returned_record = next(item for item in documents_response.context["records"] if item.entity_id == request.id)
+        rework_response = self.client.get(returned_record.rework_edit_url)
+        self.assertContains(rework_response, reason)
+
+    def test_director_can_send_documents_to_accounting_in_bulk(self) -> None:
+        first_request = create_procurement_request(
+            user=self.site_manager,
+            cleaned_data={
+                "request_date": timezone.localdate(),
+                "site_name": "Участок 12",
+                "contract": self.contract,
+                "supplier": self.supplier,
+                "status": DocumentStatus.APPROVAL,
+                "notes": "bulk-1",
+                "items": material_items(quantity="1", unit_price="100", notes="bulk-1"),
+            },
+        )
+        second_request = create_procurement_request(
+            user=self.site_manager,
+            cleaned_data={
+                "request_date": timezone.localdate(),
+                "site_name": "Участок 12",
+                "contract": self.contract,
+                "supplier": self.supplier,
+                "status": DocumentStatus.APPROVAL,
+                "notes": "bulk-2",
+                "items": material_items(quantity="1", unit_price="100", notes="bulk-2"),
+            },
+        )
+        draft_request = create_procurement_request(
+            user=self.site_manager,
+            cleaned_data={
+                "request_date": timezone.localdate(),
+                "site_name": "Участок 12",
+                "contract": self.contract,
+                "supplier": self.supplier,
+                "status": DocumentStatus.DRAFT,
+                "notes": "bulk-draft",
+                "items": material_items(quantity="1", unit_price="100", notes="bulk-draft"),
+            },
+        )
+        first_record = DocumentRecord.objects.get(entity_type="procurement_request", entity_id=first_request.id)
+        second_record = DocumentRecord.objects.get(entity_type="procurement_request", entity_id=second_request.id)
+        draft_record = DocumentRecord.objects.get(entity_type="procurement_request", entity_id=draft_request.id)
+        first_record = transition_document(user=self.director, record=first_record, new_status=DocumentStatus.APPROVED)
+        second_record = transition_document(user=self.director, record=second_record, new_status=DocumentStatus.APPROVED)
+
+        self.client.login(username="director", password="director123")
+        documents_response = self.client.get(reverse("documents"))
+        self.assertContains(documents_response, "Пакетная отправка в бухгалтерию")
+        self.assertContains(documents_response, "data-bulk-accounting-item")
+
+        post_response = self.client.post(
+            reverse("documents"),
+            {
+                "action": "bulk_send_accounting",
+                "record_ids": [str(first_record.id), str(second_record.id), str(draft_record.id)],
+            },
+        )
+
+        self.assertEqual(post_response.status_code, 302)
+        first_request.refresh_from_db()
+        second_request.refresh_from_db()
+        draft_request.refresh_from_db()
+        self.assertEqual(first_request.status, DocumentStatus.SENT_ACCOUNTING)
+        self.assertEqual(second_request.status, DocumentStatus.SENT_ACCOUNTING)
+        self.assertEqual(draft_request.status, DocumentStatus.DRAFT)
+
     def test_admin_can_manage_users_from_catalog(self) -> None:
         self.client.login(username="admin", password="admin123")
 
@@ -1312,7 +1875,9 @@ class PPELifecycleReportingTests(TestCase):
             site_name="Участок 1",
             season="",
             issued_by=self.user,
-            status=DocumentStatus.DRAFT,
+            confirmed_by=self.user,
+            confirmed_at=timezone.now(),
+            status=DocumentStatus.SUPPLY_CONFIRMED,
             notes="",
         )
         return PPEIssuanceLine.objects.create(

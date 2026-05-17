@@ -1,5 +1,7 @@
 {% extends "base.html" %}
 
+{% load static %}
+
 {% block content %}
 <section class="hero-panel">
     <p>{{ description }}</p>
@@ -8,55 +10,77 @@
 {% if created_export_url %}
 <section class="panel">
     <div class="panel-head">
-        <h3>Word готов</h3>
+        <h3>Файл готов</h3>
     </div>
     <div class="action-row">
-        <a class="primary-button" href="{{ created_export_url }}">Скачать Word</a>
+        <a class="primary-button" href="{{ created_export_url }}">Скачать файл</a>
         <a class="ghost-button" href="{{ documents_url }}">Документы в работе</a>
     </div>
 </section>
 {% endif %}
 
-<section class="content-grid">
-    <article class="panel">
+<section class="workspace-shell" data-workspace-tabs data-default-workspace="{% if is_editing or form.errors %}form{% elif created_export_url or not can_create %}list{% endif %}">
+    <div class="workspace-switcher" role="list" aria-label="Выбор рабочей области">
+        {% if can_create %}
+            <button type="button" class="workspace-choice" data-workspace-trigger="form" aria-controls="workspace-form" aria-pressed="false">
+                <span class="workspace-choice-icon" aria-hidden="true"><svg class="bi"><use href="{% static 'vendor/bootstrap-icons/bootstrap-icons.svg' %}#collection"></use></svg></span>
+                <span class="workspace-choice-copy">
+                    <strong>{% if is_editing %}Редактировать запись{% else %}Добавить запись{% endif %}</strong>
+                    <span>Открыть форму справочника на всю рабочую область</span>
+                </span>
+            </button>
+        {% endif %}
+        <button type="button" class="workspace-choice" data-workspace-trigger="list" aria-controls="workspace-list" aria-pressed="false">
+            <span class="workspace-choice-icon" aria-hidden="true"><svg class="bi"><use href="{% static 'vendor/bootstrap-icons/bootstrap-icons.svg' %}#journal-text"></use></svg></span>
+            <span class="workspace-choice-copy">
+                <strong>Последние записи</strong>
+                <span>Открыть таблицу справочника на всю рабочую область</span>
+            </span>
+        </button>
+    </div>
+
+    <div class="workspace-empty" data-workspace-empty>
+        Выберите, с каким блоком работать: форма записи или список справочника.
+    </div>
+
+    <div class="workspace-panels">
+    {% if can_create %}
+    <article class="panel workspace-panel" id="workspace-form" data-workspace-panel="form" hidden>
         <div class="panel-head">
             <h3>{% if is_editing %}Редактировать запись{% else %}Добавить запись{% endif %}</h3>
         </div>
-        {% if can_create %}
-            <form method="post" class="stack-form">
-                {% csrf_token %}
-                <input type="hidden" name="action" value="save">
-                {% if is_editing %}
-                    <input type="hidden" name="object_id" value="{{ form.instance.pk }}">
-                {% endif %}
-                {% if form.non_field_errors %}
-                    <div class="field-error">{{ form.non_field_errors|join:", " }}</div>
-                {% endif %}
-                {% for field in form %}
-                    <div class="field">
-                        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-                        {{ field }}
-                        {% if field.help_text %}
-                            <div class="field-help">{{ field.help_text }}</div>
-                        {% endif %}
-                        {% if field.errors %}
-                            <div class="field-error">{{ field.errors|join:", " }}</div>
-                        {% endif %}
-                    </div>
-                {% endfor %}
-                <div class="action-row">
-                    <button type="submit" class="primary-button">{% if is_editing %}Сохранить изменения{% else %}Сохранить{% endif %}</button>
-                    {% if is_editing %}
-                        <a class="ghost-button" href="{% url 'catalog-page' current_catalog %}">Отменить</a>
+        <form method="post" class="stack-form">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="save">
+            {% if is_editing %}
+                <input type="hidden" name="object_id" value="{{ form.instance.pk }}">
+            {% endif %}
+            {% if form.non_field_errors %}
+                <div class="field-error">{{ form.non_field_errors|join:", " }}</div>
+            {% endif %}
+            {% for field in form %}
+                <div class="field">
+                    <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                    {{ field }}
+                    {% if field.help_text %}
+                        <div class="field-help">{{ field.help_text }}</div>
+                    {% endif %}
+                    {% if field.errors %}
+                        <div class="field-error">{{ field.errors|join:", " }}</div>
                     {% endif %}
                 </div>
-            </form>
-        {% else %}
-            <div class="field-help">Для вашей роли доступен только просмотр списка.</div>
-        {% endif %}
+            {% endfor %}
+            <div class="action-row">
+                <button type="submit" class="primary-button">{% if is_editing %}Сохранить изменения{% else %}Сохранить{% endif %}</button>
+                {% if is_editing %}
+                    <a class="ghost-button" href="{% url 'catalog-page' current_catalog %}">Отменить</a>
+                {% endif %}
+            </div>
+        </form>
     </article>
+    {% endif %}
 
-    <article class="panel panel-wide">
+    <article class="panel panel-wide workspace-panel" id="workspace-list" data-workspace-panel="list" hidden>
         <div class="panel-head">
             <h3>Последние записи</h3>
         </div>
@@ -82,7 +106,7 @@
                                 <td>
                                     <div class="action-row">
                                         {% if row.export_url %}
-                                            <a class="ghost-button" href="{{ row.export_url }}">Word</a>
+                                            <a class="ghost-button" href="{{ row.export_url }}">Экспорт</a>
                                         {% endif %}
                                         {% if catalog_has_manage_actions %}
                                             <a class="ghost-button" href="{{ row.edit_url }}">Изменить</a>
@@ -106,5 +130,6 @@
             </table>
         </div>
     </article>
+    </div>
 </section>
 {% endblock %}

@@ -279,7 +279,13 @@ def sync_writeoff(sender, instance: WriteOffAct, **kwargs) -> None:
         created_by=instance.created_by,
         metadata=_workflow_metadata(
             "write_off",
-            {"work_type": instance.work_type, "work_volume": str(instance.work_volume), "site_name": instance.site_name, "contract_id": instance.contract_id},
+            {
+                "work_type": instance.work_type,
+                "work_volume": str(instance.work_volume),
+                "site_name": instance.site_name,
+                "contract_id": instance.contract_id,
+                "template_variant": instance.template_variant,
+            },
         ),
         search_text=instance.notes,
     )
@@ -298,7 +304,14 @@ def sync_ppe(sender, instance: PPEIssuance, **kwargs) -> None:
         counterparty=instance.site_name,
         object_name=instance.site_name,
         created_by=instance.issued_by,
-        metadata=_workflow_metadata("ppe_issuance", {"site_name": instance.site_name}),
+        metadata=_workflow_metadata(
+            "ppe_issuance",
+            {
+                "site_name": instance.site_name,
+                "confirmed_by_id": instance.confirmed_by_id,
+                "confirmed_at": instance.confirmed_at.isoformat() if instance.confirmed_at else "",
+            },
+        ),
         search_text=instance.notes,
     )
 
